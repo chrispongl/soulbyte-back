@@ -1,0 +1,298 @@
+
+import { AgentContext, NeedUrgency, CandidateIntent, IntentDecision, UrgencyLevel } from './types.js';
+import { SeededRNG } from '../../utils/rng.js';
+import { personaService } from '../persona/persona.service.js';
+import { filterBusyCandidates } from '../intent-guards.js';
+import { runSkills } from '../skills/runner.js';
+import { MemoryManager } from './memory-manager.js';
+import { debugLog } from '../../utils/debug-log.js';
+
+export class DecisionEngine {
+
+    static async decide(
+        ctx: AgentContext,
+        urgencies: NeedUrgency[],
+        rng: SeededRNG
+    ): Promise<IntentDecision> {
+
+        const isBusy = Boolean(
+            ctx.state.activityState &&
+            ctx.state.activityState !== 'IDLE'
+        );
+        if (ctx.state.activityState === 'JAILED') {
+            return { intentType: 'INTENT_IDLE', params: {}, reason: 'Jailed' };
+        }
+        const maxSurvivalUrgency = Math.max(
+            ...urgencies.filter(u => u.domain === 'survival').map(u => u.urgency),
+            UrgencyLevel.NONE
+        );
+
+
+        // --- OWNER SUGGESTION (override unless unsafe) ---
+        if (ctx.ownerSuggestion) {
+            const ownerParams = (ctx.ownerSuggestion.params as Record<string, any>) ?? {};
+            return {
+                intentType: ctx.ownerSuggestion.type,
+                params: { ...ownerParams, ownerOverride: true },
+                reason: 'Owner requested this',
+                confidence: 1,
+                budgetExceeded: [],
+            };
+        }
+
+        // --- GENERATE CANDIDATES FROM SKILLS ---
+        const candidates: CandidateIntent[] = [];
+        let budgetNote: string | null = null;
+        let budgetExceeded: string[] = [];
+        try {
+            const skillResult = runSkills({ ctx, urgencies });
+            candidates.push(...skillResult.candidates);
+            if (skillResult.budgetExceeded.length > 0) {
+                budgetExceeded = skillResult.budgetExceeded;
+                budgetNote = `Skill budgets exceeded: ${skillResult.budgetExceeded.join(', ')}`;
+            }
+        } catch (e) {
+            console.error('SkillRunner error', e);
+        }
+
+        // Disallow free food: remove forage candidates entirely.
+        const nonForageCandidates = candidates.filter(c => c.intentType !== 'INTENT_FORAGE');
+
+        // Always have IDLE as fallback
+        nonForageCandidates.push({
+            intentType: 'INTENT_IDLE',
+            params: {},
+            basePriority: 5,
+            personalityBoost: 0,
+            reason: 'Nothing pressing to do',
+            domain: 'core',
+        });
+
+        const personaMods = await personaService.getModifiers(ctx.agent.id);
+        const domainBias = toDomainBias(personaMods);
+
+        let filteredCandidates = filterBusyCandidates(nonForageCandidates, isBusy);
+        if (isBusy) {
+            if (maxSurvivalUrgency >= UrgencyLevel.MODERATE) {
+                const survivalCandidates = nonForageCandidates.filter(c => c.domain === 'survival');
+                if (survivalCandidates.length > 0) {
+                    const seen = new Set<string>();
+                    filteredCandidates = [...filteredCandidates, ...survivalCandidates].filter(c => {
+                        const key = `${c.intentType}:${c.domain}:${JSON.stringify(c.params ?? {})}`;
+                        if (seen.has(key)) return false;
+                        seen.add(key);
+                        return true;
+                    });
+                    debugLog('brain.busy_override', {
+                        agentId: ctx.agent.id,
+                        tick: ctx.tick,
+                        activityState: ctx.state.activityState,
+                        maxSurvivalUrgency,
+                        addedSurvivalCandidates: survivalCandidates.length,
+                    });
+                }
+            }
+        }
+        if (isBusy && filteredCandidates.length === 0) {
+            return { intentType: 'INTENT_IDLE', params: {}, reason: withBudgetNote('Busy state blocks available actions', budgetNote), budgetExceeded };
+        }
+
+        const weighted = filteredCandidates.map(c => {
+            const shouldIgnoreFailPenalty = c.intentType === 'INTENT_APPLY_PUBLIC_JOB'
+                || c.intentType === 'INTENT_APPLY_PRIVATE_JOB';
+            const failPenalty = shouldIgnoreFailPenalty
+                ? 0
+                : MemoryManager.getRecentFailures(ctx.agent.id, c.intentType, ctx.tick) * -10;
+            const rawScore = Math.max(0,
+                c.basePriority
+                + c.personalityBoost
+                + (domainBias[c.domain] ?? 0)
+                + (personaMods.intentBoosts[c.intentType] ?? 0)
+                + (isGoalAligned(c.intentType, personaMods) ? 15 : 0)
+                + (isAvoidedTarget(c.params, personaMods) ? -25 : 0)
+                + (isPreferredTarget(c.params, personaMods) ? 10 : 0)
+                + failPenalty
+            );
+            const jitter = getDecisionJitter(ctx.personality, rng, c.domain, maxSurvivalUrgency);
+            const adjustedScore = Math.max(0, rawScore * (1 + jitter));
+            return {
+                ...c,
+                rawScore: adjustedScore,
+                finalScore: Math.pow(adjustedScore, 1.5),
+            };
+        });
+        debugLog('brain.candidates', {
+            agentId: ctx.agent.id,
+            tick: ctx.tick,
+            urgencies,
+            candidateCount: weighted.length,
+            topCandidates: weighted
+                .slice()
+                .sort((a, b) => b.finalScore - a.finalScore)
+                .slice(0, 5)
+                .map(c => ({
+                    intentType: c.intentType,
+                    domain: c.domain,
+                    rawScore: c.rawScore,
+                    finalScore: c.finalScore,
+                    reason: c.reason,
+                    params: c.params,
+                })),
+        });
+
+        const criticalSurvival = urgencies.find(u =>
+            u.domain === 'survival' && u.urgency === UrgencyLevel.CRITICAL
+        );
+        if (criticalSurvival) {
+            const survivalCandidates = weighted.filter(c => c.domain === 'survival');
+            if (survivalCandidates.length > 0) {
+                survivalCandidates.sort((a, b) => b.finalScore - a.finalScore);
+                const chosen = {
+                    intentType: survivalCandidates[0].intentType,
+                    params: survivalCandidates[0].params,
+                    reason: withBudgetNote(survivalCandidates[0].reason, budgetNote),
+                    confidence: 1,
+                    budgetExceeded,
+                };
+                debugLog('brain.decision', {
+                    agentId: ctx.agent.id,
+                    tick: ctx.tick,
+                    decision: chosen,
+                    reason: 'critical_survival',
+                });
+                return chosen;
+            }
+        }
+
+        const minTier = Math.min(...weighted.map(c => getCandidateTier(c, urgencies)));
+        const tiered = weighted.filter(c => getCandidateTier(c, urgencies) === minTier);
+
+        // --- WEIGHTED RANDOM SELECTION ---
+        // Sort by score, then use RNG to pick from top candidates
+        // This allows variety while respecting priorities
+        const pool = (tiered.length > 0 ? tiered : weighted).sort((a, b) => b.finalScore - a.finalScore);
+
+        // Take top 3 candidates
+        const topN = pool.slice(0, 3);
+        const totalWeight = topN.reduce((sum, c) => sum + c.finalScore, 0);
+
+        if (totalWeight === 0) {
+            return { intentType: 'INTENT_IDLE', params: {}, reason: withBudgetNote('No viable options', budgetNote), budgetExceeded };
+        }
+
+        let roll = rng.next() * totalWeight;
+        for (const candidate of topN) {
+            roll -= candidate.finalScore;
+            if (roll <= 0) {
+                const chosen = {
+                    intentType: candidate.intentType,
+                    params: candidate.params,
+                    reason: withBudgetNote(candidate.reason, budgetNote),
+                    confidence: candidate.finalScore / 100,
+                    budgetExceeded
+                };
+                debugLog('brain.decision', {
+                    agentId: ctx.agent.id,
+                    tick: ctx.tick,
+                    decision: chosen,
+                    reason: 'weighted_pick',
+                });
+                return chosen;
+            }
+        }
+
+        // Fallback
+        const fallback = { intentType: 'INTENT_IDLE', params: {}, reason: withBudgetNote('Fallback', budgetNote), budgetExceeded };
+        debugLog('brain.decision', {
+            agentId: ctx.agent.id,
+            tick: ctx.tick,
+            decision: fallback,
+            reason: 'fallback',
+        });
+        return fallback;
+    }
+}
+
+function toDomainBias(mods: Awaited<ReturnType<typeof personaService.getModifiers>>): Record<string, number> {
+    return {
+        survival: mods.survivalBias,
+        economy: mods.economyBias,
+        social: mods.socialBias,
+        crime: mods.crimeBias,
+        leisure: mods.leisureBias,
+        governance: mods.governanceBias,
+        business: mods.businessBias,
+    };
+}
+
+function isGoalAligned(intentType: string, mods: Awaited<ReturnType<typeof personaService.getModifiers>>): boolean {
+    return mods.activeGoalIntents.includes(intentType);
+}
+
+function isAvoidedTarget(params: Record<string, any>, mods: Awaited<ReturnType<typeof personaService.getModifiers>>): boolean {
+    const targetId = extractTargetId(params);
+    return targetId ? mods.avoidActors.includes(targetId) : false;
+}
+
+function isPreferredTarget(params: Record<string, any>, mods: Awaited<ReturnType<typeof personaService.getModifiers>>): boolean {
+    const targetId = extractTargetId(params);
+    return targetId ? mods.preferActors.includes(targetId) : false;
+}
+
+function extractTargetId(params: Record<string, any>): string | null {
+    if (!params) return null;
+    if (params.targetId) return params.targetId;
+    if (params.actorId) return params.actorId;
+    if (params.targetActorId) return params.targetActorId;
+    if (Array.isArray(params.targetIds) && params.targetIds.length > 0) return params.targetIds[0];
+    return null;
+}
+
+function withBudgetNote(reason: string, budgetNote: string | null): string {
+    if (!budgetNote) return reason;
+    return `${reason} | ${budgetNote}`;
+}
+
+function getCandidateTier(candidate: CandidateIntent, urgencies: NeedUrgency[]): number {
+    if (candidate.intentType === 'INTENT_FREEZE') return 0;
+    switch (candidate.domain) {
+        case 'survival': {
+            const maxSurvivalUrgency = Math.max(
+                ...urgencies.filter(u => u.domain === 'survival').map(u => u.urgency),
+                UrgencyLevel.NONE
+            );
+            return maxSurvivalUrgency >= UrgencyLevel.MODERATE ? 1 : 2;
+        }
+        case 'economy':
+        case 'economic':
+            return 2;
+        case 'housing':
+            return 1;
+        case 'gaming': {
+            const funUrgency = urgencies.find(u => u.need === 'fun');
+            if (funUrgency && funUrgency.value < 10) return 2;
+            return 3;
+        }
+        case 'social':
+        case 'leisure':
+            return 3;
+        case 'governance':
+            return 4;
+        case 'business':
+            return 3;
+        default:
+            return 6;
+    }
+}
+
+function getDecisionJitter(
+    personality: { riskTolerance: number; creativity: number },
+    rng: SeededRNG,
+    domain: string,
+    maxSurvivalUrgency: UrgencyLevel
+): number {
+    if (domain === 'survival' && maxSurvivalUrgency >= UrgencyLevel.MODERATE) return 0;
+    const traitBlend = (personality.riskTolerance + personality.creativity) / 200; // 0..1
+    const maxJitter = 0.01 + (traitBlend * 0.02); // 1%..3%
+    return (rng.next() - 0.5) * 2 * maxJitter;
+}

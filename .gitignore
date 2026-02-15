@@ -1,0 +1,10 @@
+dist/
+node_modules/
+docs/
+logs/
+scripts/
+!src/scripts/
+!src/scripts/export-genesis-bot-wallets.ts
+
+*.log
+.env
