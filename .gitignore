@@ -1,10 +1,31 @@
-dist/
+# General
 node_modules/
-docs/
-logs/
-scripts/
-!src/scripts/
-!src/scripts/export-genesis-bot-wallets.ts
-
+dist/
+build/
+.DS_Store
 *.log
+
+# Environment variables
 .env
+.env.*
+!.env.example
+
+# App specific exclusions
+# World API
+apps/world-api/node_modules/
+apps/world-api/logs/
+apps/world-api/soulbyte-back/
+apps/world-api/dist/
+apps/world-api/.env
+apps/world-api/.env.*
+!apps/world-api/.env.example
+
+# Agents
+apps/agents/node_modules/
+apps/agents/dist/
+apps/agents/.env
+
+# Web
+apps/web/node_modules/
+apps/web/dist/
+apps/web/.env
