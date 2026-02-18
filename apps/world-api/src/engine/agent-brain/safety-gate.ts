@@ -1,6 +1,8 @@
 
 import { AgentContext, IntentDecision } from './types.js';
+import { IntentType } from '../../types/intent.types.js';
 import { isIntentAllowedWhileBusy } from '../intent-guards.js';
+import { REAL_DAY_TICKS } from '../../config/time.js';
 
 const BUSINESS_CONFIG: Record<string, { buildCost: number; minCapital: number }> = {
     BANK: { buildCost: 15000, minCapital: 100000 },
@@ -14,6 +16,33 @@ const BUSINESS_CONFIG: Record<string, { buildCost: number; minCapital: number }>
     WORKSHOP: { buildCost: 3500, minCapital: 3000 },
     ENTERTAINMENT: { buildCost: 6000, minCapital: 2000 },
 };
+
+const BUSINESS_DECISION_INTENTS = new Set<string>([
+    IntentType.INTENT_FOUND_BUSINESS,
+    IntentType.INTENT_CONVERT_BUSINESS,
+    IntentType.INTENT_UPGRADE_BUSINESS,
+    IntentType.INTENT_SET_PRICES,
+    IntentType.INTENT_IMPROVE_BUSINESS,
+    IntentType.INTENT_HIRE_EMPLOYEE,
+    IntentType.INTENT_ADJUST_SALARY,
+    IntentType.INTENT_FIRE_EMPLOYEE,
+    IntentType.INTENT_SELL_BUSINESS,
+    IntentType.INTENT_BUY_BUSINESS,
+    IntentType.INTENT_DISSOLVE_BUSINESS,
+    IntentType.INTENT_WITHDRAW_BUSINESS_FUNDS,
+    IntentType.INTENT_INJECT_BUSINESS_FUNDS,
+    IntentType.INTENT_BUSINESS_WITHDRAW,
+    IntentType.INTENT_BUSINESS_INJECT,
+    IntentType.INTENT_CLOSE_BUSINESS,
+    IntentType.INTENT_SET_LOAN_TERMS,
+    IntentType.INTENT_APPROVE_LOAN,
+    IntentType.INTENT_DENY_LOAN,
+    IntentType.INTENT_SET_HOUSE_EDGE,
+    IntentType.INTENT_MANAGE_RESTAURANT,
+    IntentType.INTENT_MANAGE_CLINIC,
+    IntentType.INTENT_HOST_EVENT,
+    IntentType.INTENT_TRANSFER_MON_TO_BUSINESS,
+]);
 
 function getIntentCost(decision: IntentDecision, ctx: AgentContext): number {
     if (decision.intentType === 'INTENT_PAY_RENT') {
@@ -144,6 +173,13 @@ function validateIntent(decision: IntentDecision, ctx: AgentContext): string | n
         if (!params.businessId) return 'Missing businessId';
         const business = ctx.businesses.owned.find((b) => b.id === params.businessId);
         if (!business) return 'Business not owned';
+    }
+    if (type === 'INTENT_TRANSFER_MON_TO_BUSINESS') {
+        if (!params.businessId) return 'Missing businessId';
+        const business = ctx.businesses.owned.find((b) => b.id === params.businessId);
+        if (!business) return 'Business not owned';
+        const amount = Number(params.amount ?? 0);
+        if (amount <= 0 || amount > 10) return 'Invalid MON amount (must be 1-10)';
     }
     if (type === 'INTENT_VISIT_BUSINESS') {
         if (!params.businessId) return 'Missing businessId';
@@ -305,6 +341,41 @@ export class SafetyGate {
 
         // 0. check Busy State
         const isOwnerOverride = Boolean((decision.params as any)?.ownerOverride || (decision.params as any)?.source === 'owner_suggestion');
+        const isBusinessStartupIntent = decision.intentType === IntentType.INTENT_FOUND_BUSINESS
+            || decision.intentType === IntentType.INTENT_CONVERT_BUSINESS;
+        const hasActivePublicJob = Boolean(ctx.job.publicEmployment && ctx.job.publicEmployment.endedAtTick === null);
+        const hasActivePrivateJob = Boolean(ctx.job.privateEmployment);
+        if (isBusinessStartupIntent && (hasActivePublicJob || hasActivePrivateJob)) {
+            const startupPlan = {
+                intentType: decision.intentType,
+                params: decision.params ?? {},
+                createdTick: ctx.tick,
+                basePriority: 70,
+            };
+            if (hasActivePublicJob) {
+                return {
+                    intentType: IntentType.INTENT_RESIGN_PUBLIC_JOB,
+                    params: {
+                        reason: 'business_startup',
+                        businessStartupPlan: startupPlan,
+                        businessStartupCooldownUntilTick: ctx.tick + REAL_DAY_TICKS,
+                    },
+                    reason: 'SafetyGate: resign public job before starting business'
+                };
+            }
+            if (hasActivePrivateJob && ctx.job.privateEmployment) {
+                return {
+                    intentType: IntentType.INTENT_QUIT_JOB,
+                    params: {
+                        businessId: ctx.job.privateEmployment.businessId,
+                        reason: 'business_startup',
+                        businessStartupPlan: startupPlan,
+                        businessStartupCooldownUntilTick: ctx.tick + REAL_DAY_TICKS,
+                    },
+                    reason: 'SafetyGate: quit private job before starting business'
+                };
+            }
+        }
         const hunger = Number(ctx.needs.hunger ?? 100);
         const energy = Number(ctx.needs.energy ?? 100);
         const health = Number(ctx.needs.health ?? 100);
@@ -316,12 +387,14 @@ export class SafetyGate {
             || (urgentEnergy && decision.intentType === 'INTENT_REST')
             || (urgentHealth && decision.intentType === 'INTENT_VISIT_BUSINESS')
         );
+        const isBusinessDecision = BUSINESS_DECISION_INTENTS.has(decision.intentType);
         if (
             ctx.state.activityState &&
             ctx.state.activityState !== 'IDLE' &&
             !isIntentAllowedWhileBusy(decision.intentType) &&
             !emergencyBusyOverride &&
-            !isOwnerOverride
+            !isOwnerOverride &&
+            !isBusinessDecision
         ) {
             return {
                 intentType: 'INTENT_IDLE',
@@ -383,21 +456,21 @@ export class SafetyGate {
             }
         }
 
-    const activityIntents = new Set([
-        'INTENT_REST',
-        'INTENT_WORK',
-        'INTENT_START_SHIFT',
-        'INTENT_WORK_OWN_BUSINESS',
-        'INTENT_PATROL',
-        'INTENT_FORAGE',
-    ]);
-    if (activityIntents.has(decision.intentType) && ctx.state.activityState !== 'IDLE' && !emergencyBusyOverride) {
-        return {
-            intentType: 'INTENT_IDLE',
-            params: {},
-            reason: `SafetyGate: Invalid activity transition from ${ctx.state.activityState}`
-        };
-    }
+        const activityIntents = new Set([
+            'INTENT_REST',
+            'INTENT_WORK',
+            'INTENT_START_SHIFT',
+            'INTENT_WORK_OWN_BUSINESS',
+            'INTENT_PATROL',
+            'INTENT_FORAGE',
+        ]);
+        if (activityIntents.has(decision.intentType) && ctx.state.activityState !== 'IDLE' && !emergencyBusyOverride && !isBusinessDecision) {
+            return {
+                intentType: 'INTENT_IDLE',
+                params: {},
+                reason: `SafetyGate: Invalid activity transition from ${ctx.state.activityState}`
+            };
+        }
 
         // Pass
         return {

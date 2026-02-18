@@ -280,27 +280,46 @@ const mapEventType = (type: string, buildingType?: string | null) => {
                 ? 'business_constructed'
                 : 'property_construction_completed';
         case 'EVENT_BUSINESS_UPGRADED':
+            return 'business_upgraded';
         case 'EVENT_BUSINESS_DISSOLVED':
+            return 'business_dissolved';
         case 'EVENT_BUSINESS_BANKRUPT':
+            return 'business_bankrupt';
         case 'EVENT_BUSINESS_PAYROLL_PAID':
+            return 'business_payroll_paid';
         case 'EVENT_BUSINESS_PAYROLL_MISSED':
+            return 'business_payroll_missed';
         case 'EVENT_BUSINESS_CRITICAL_FUNDS':
+            return 'business_critical_funds';
         case 'EVENT_BUSINESS_LOW_GAS':
+            return 'business_low_gas';
         case 'EVENT_BUSINESS_CLOSED':
+            return 'business_closed';
         case 'EVENT_BUSINESS_TAX_PAID':
+            return 'business_tax_paid';
         case 'EVENT_BUSINESS_TAX_MISSED':
+            return 'business_tax_missed';
         case 'EVENT_BUSINESS_MAINTENANCE_PAID':
+            return 'business_maintenance_paid';
         case 'EVENT_BUSINESS_QUALITY_DROP':
+            return 'business_quality_drop';
         case 'EVENT_BUSINESS_INJECT':
+            return 'business_inject';
         case 'EVENT_BUSINESS_WITHDRAW':
+            return 'business_withdraw';
         case 'EVENT_EMPLOYEE_HIRED':
+            return 'employee_hired';
         case 'EVENT_EMPLOYEE_FIRED':
+            return 'employee_fired';
         case 'EVENT_EMPLOYEE_QUIT':
         case 'EVENT_EMPLOYEE_QUIT_UNPAID':
+            return 'employee_quit';
         case 'EVENT_EMPLOYEE_SALARY_ADJUSTED':
+            return 'employee_salary_adjusted';
         case 'EVENT_BUSINESS_REVENUE_EARNED':
+            return 'business_revenue_earned';
         case 'EVENT_BUSINESS_CUSTOMER_VISIT':
-            return 'business_founded';
+            return 'business_visit';
         case 'EVENT_EVICTION':
             return 'eviction';
         case 'EVENT_VOTE_CAST':
@@ -340,7 +359,7 @@ const mapEventType = (type: string, buildingType?: string | null) => {
 const buildDescription = (
     eventType: string,
     event: { type: string; sideEffects?: any; outcome?: string },
-    context: { targetName?: string | null; publicPlaceName?: string | null; role?: string | null; shiftHours?: number | null }
+    context: { targetName?: string | null; publicPlaceName?: string | null; role?: string | null; shiftHours?: number | null; businessName?: string | null }
 ) => {
     const fx = event.sideEffects ?? {};
     const targetName = context.targetName ?? 'another agent';
@@ -409,6 +428,8 @@ const buildDescription = (
                 return `Finished work segment ${fx.segmentIndex ?? '?'}/10 and completed a full workday.`;
             }
             return `Finished work segment ${fx.segmentIndex ?? '?'}/10; payment pending until the workday completes.`;
+        case 'EVENT_BUSINESS_FOUNDED':
+            return `Founded ${context.businessName ?? fx.businessName ?? 'a new business'}${fx.businessType ? ` (${fx.businessType})` : ''}.`;
         case 'EVENT_REPUTATION_UPDATED':
             return `Reputation changed by ${fx.delta ?? 0}.`;
         case 'EVENT_SALARY_COLLECTED':
@@ -416,8 +437,17 @@ const buildDescription = (
                 return `Salary collection blocked.${blockedReason}`;
             }
             return `Collected salary of ${formatSbyte(fx.netSalary ?? fx.grossSalary)} from ${fx.publicPlaceName ?? 'the public vault'}.`;
-        case 'EVENT_BUSINESS_CUSTOMER_VISIT':
-            return `Paid ${formatSbyte(fx.price ?? fx.totalCost ?? fx.amount)} for services at a business.`;
+        case 'EVENT_BUSINESS_CUSTOMER_VISIT': {
+            if (event.outcome === 'blocked') return `Business visit blocked.${blockedReason}`;
+            const bizName = context.businessName ?? fx.businessName ?? 'a business';
+            if (fx.casinoResult === 'WIN') {
+                return `Won ${formatSbyte(fx.payout)} at ${bizName} (bet ${formatSbyte(fx.bet)}, ${fx.multiplier ?? '?'}x).`;
+            }
+            if (fx.casinoResult === 'LOSS') {
+                return `Lost ${formatSbyte(fx.bet)} at ${bizName}.`;
+            }
+            return `Paid ${formatSbyte(fx.price ?? fx.totalCost ?? fx.amount)} for services at ${bizName}.`;
+        }
         case 'EVENT_BUSINESS_PAYROLL_PAID':
             return `Business payroll cleared: ${formatSbyte(fx.totalPayroll)} sent to employees.`;
         case 'EVENT_BUSINESS_PAYROLL_MISSED':
@@ -444,13 +474,52 @@ const buildDescription = (
         case 'EVENT_PROPERTY_SOLD':
             return `Sold property for ${formatSbyte(fx.salePrice ?? fx.amount)}.`;
         case 'EVENT_PROPERTY_LISTED':
-            return `Listed property${fx.housingTier ? ` (${fx.housingTier})` : ''} for sale.`;
+            if (event.outcome === 'blocked') return `Property listing failed.${blockedReason}`;
+            return `Listed property${fx.propertyType ? ` (${fx.propertyType})` : ''} for ${fx.forSale ? 'sale' : 'rent'}.`;
         case 'EVENT_AGORA_POSTED':
             return `Posted an opinion to Agora on ${fx.topic ?? 'a civic topic'}.`;
         case 'EVENT_LIFE_EVENT_FORTUNE':
             return `Fortune event: gained ${formatSbyte(fx.amount)}.`;
         case 'EVENT_LIFE_EVENT_MISFORTUNE':
             return `Misfortune event: lost ${formatSbyte(fx.amount)}.`;
+        case 'EVENT_BUSINESS_CONVERTED':
+            return `Converted property into ${context.businessName ?? fx.businessName ?? 'a business'}${fx.businessType ? ` (${fx.businessType})` : ''}.`;
+        case 'EVENT_BUSINESS_UPGRADED':
+            return `Upgraded ${context.businessName ?? 'business'} to level ${fx.level ?? '?'}.`;
+        case 'EVENT_BUSINESS_DISSOLVED':
+            return `Dissolved ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_BUSINESS_BANKRUPT':
+            return `${context.businessName ?? 'A business'} went bankrupt.`;
+        case 'EVENT_BUSINESS_TAX_PAID':
+            return `Paid ${formatSbyte(fx.amount)} in business taxes for ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_BUSINESS_TAX_MISSED':
+            return `Missed business tax payment for ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_BUSINESS_MAINTENANCE_PAID':
+            return `Paid ${formatSbyte(fx.amount)} for maintenance at ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_BUSINESS_QUALITY_DROP':
+            return `Quality dropped at ${context.businessName ?? 'a business'} due to maintenance issues.`;
+        case 'EVENT_BUSINESS_INJECT':
+            return `Injected ${formatSbyte(fx.amount)} into ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_BUSINESS_WITHDRAW':
+            return `Withdrew ${formatSbyte(fx.amount)} from ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_EMPLOYEE_HIRED':
+            return `Hired ${targetName} at ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_EMPLOYEE_FIRED':
+            return `Fired ${targetName} from ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_EMPLOYEE_QUIT':
+            return `${targetName ?? 'An employee'} quit ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_EMPLOYEE_QUIT_UNPAID':
+            return `${targetName ?? 'An employee'} quit ${context.businessName ?? 'a business'} due to unpaid wages.`;
+        case 'EVENT_EMPLOYEE_SALARY_ADJUSTED':
+            return `Adjusted salary for ${targetName} at ${context.businessName ?? 'a business'}.`;
+        case 'EVENT_BUSINESS_CRITICAL_FUNDS':
+            return `${context.businessName ?? 'A business'} has critically low funds.`;
+        case 'EVENT_BUSINESS_LOW_GAS':
+            return `${context.businessName ?? 'A business'} has low gas (MON) for on-chain operations.`;
+        case 'EVENT_BUSINESS_CLOSED':
+            return `${context.businessName ?? 'A business'} was closed.`;
+        case 'EVENT_BUSINESS_REVENUE_EARNED':
+            return `${context.businessName ?? 'A business'} earned ${formatSbyte(fx.amount)} in revenue.`;
         default:
             break;
     }
@@ -467,8 +536,28 @@ const buildDescription = (
     if (eventType === 'buy_item') return 'Purchased item';
     if (eventType === 'traded') return 'Market activity';
     if (eventType === 'market_listed') return 'Created a market listing';
-    if (eventType === 'founded_business') return 'Founded a business';
-    if (eventType === 'business_opened') return 'Business opened';
+    if (eventType === 'founded_business') return `Founded ${context.businessName ?? 'a new business'}.`;
+    if (eventType === 'business_visit') return 'Visited a business';
+    if (eventType === 'business_opened') return `${context.businessName ?? 'Business'} opened.`;
+    if (eventType === 'business_upgraded') return `Upgraded ${context.businessName ?? 'business'}.`;
+    if (eventType === 'business_dissolved') return `Dissolved ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_bankrupt') return `${context.businessName ?? 'A business'} went bankrupt.`;
+    if (eventType === 'business_payroll_paid') return `Payroll paid for ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_payroll_missed') return `Payroll missed for ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_critical_funds') return `${context.businessName ?? 'A business'} has critically low funds.`;
+    if (eventType === 'business_low_gas') return `${context.businessName ?? 'A business'} has low gas.`;
+    if (eventType === 'business_closed') return `${context.businessName ?? 'A business'} was closed.`;
+    if (eventType === 'business_tax_paid') return `Business taxes paid for ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_tax_missed') return `Business taxes missed for ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_maintenance_paid') return `Maintenance paid for ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_quality_drop') return `Quality dropped at ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_inject') return `Funds injected into ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_withdraw') return `Funds withdrawn from ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'employee_hired') return `Hired an employee at ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'employee_fired') return `Fired an employee from ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'employee_quit') return `An employee quit ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'employee_salary_adjusted') return `Salary adjusted at ${context.businessName ?? 'a business'}.`;
+    if (eventType === 'business_revenue_earned') return `${context.businessName ?? 'A business'} earned revenue.`;
     if (eventType === 'business_constructed') return 'Business constructed';
     if (eventType === 'property_construction_started') return 'Construction started';
     if (eventType === 'property_construction_completed') return 'Construction completed';
@@ -889,7 +978,8 @@ export async function eventsRoutes(app: FastifyInstance) {
                             targetName: targetNames[0] ?? null,
                             publicPlaceName: publicPlace?.name ?? null,
                             role: sideEffects.role ?? sideEffects.profession ?? null,
-                            shiftHours: sideEffects.shiftDurationHours ?? null
+                            shiftHours: sideEffects.shiftDurationHours ?? null,
+                            businessName: businessName ?? null
                         }
                     ),
                     cityId: event.actor?.agentState?.cityId ?? null,

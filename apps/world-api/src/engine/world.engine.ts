@@ -132,8 +132,12 @@ async function processActorIntents(
     const events: EventData[] = [];
     let processedCount = 0;
 
+    const actionableIntents = actorIntents.filter((candidate) => !isOwnerSuggestionIntent(candidate));
+    if (actionableIntents.length === 0) {
+        return { processedCount, events };
+    }
     // Pick highest priority intent (already sorted)
-    const intent = actorIntents[0];
+    const intent = actionableIntents[0];
 
     // Get actor with state
     const actor = await prisma.actor.findUnique({
@@ -157,13 +161,7 @@ async function processActorIntents(
     }
 
     const intentParams = (intent.params as any) ?? {};
-    const isOwnerSuggestion = intentParams.source === 'owner_suggestion';
     const ownerOverride = Boolean(intentParams.ownerOverride);
-
-    if (isOwnerSuggestion) {
-        await markIntentBlocked(intent.id, 'Owner suggestion is evaluated by brain', currentTick);
-        return { processedCount, events };
-    }
 
     // Activity state blocking - prevent new intents if busy
     if (actor.agentState) {
@@ -206,6 +204,12 @@ async function processActorIntents(
         try {
             await walletService.syncWalletBalances(actorId);
             actor.wallet = await prisma.wallet.findUnique({ where: { actorId } });
+            if (actor.agentState) {
+                const refreshedState = await prisma.agentState.findUnique({ where: { actorId } });
+                if (refreshedState) {
+                    actor.agentState = refreshedState;
+                }
+            }
         } catch (error: any) {
             await markIntentBlocked(intent.id, `Wallet sync failed: ${String(error?.message || error)}`, currentTick);
             return { processedCount, events };
@@ -327,8 +331,8 @@ async function processActorIntents(
         processedCount++;
 
         // Mark remaining intents for this actor as blocked (only one per tick)
-        for (let i = 1; i < actorIntents.length; i++) {
-            await markIntentBlocked(actorIntents[i].id, 'Only one intent per tick', currentTick);
+        for (let i = 1; i < actionableIntents.length; i++) {
+            await markIntentBlocked(actionableIntents[i].id, 'Only one intent per tick', currentTick);
         }
     } catch (error) {
         console.error(`Error processing intent ${intent.id}:`, error);
@@ -364,6 +368,11 @@ function extractBlockReason(events: EventData[]): string | null {
         if (sideEffects?.blockReason) return String(sideEffects.blockReason);
     }
     return null;
+}
+
+function isOwnerSuggestionIntent(intent: { params?: any }): boolean {
+    const params = (intent.params as any) ?? {};
+    return params.source === 'owner_suggestion';
 }
 
 /**
@@ -474,6 +483,7 @@ const HANDLER_MAP = new Map<string, IntentHandler>([
     [IntentType.INTENT_ACCEPT_JOB, BusinessHandlers.handleAcceptJob],
     [IntentType.INTENT_REJECT_JOB, BusinessHandlers.handleRejectJob],
     [IntentType.INTENT_QUIT_JOB, BusinessHandlers.handleQuitJob],
+    [IntentType.INTENT_TRANSFER_MON_TO_BUSINESS, BusinessHandlers.handleTransferMonToBusiness],
 
     // Life/Career
     [IntentType.INTENT_SWITCH_JOB, LifeHandlers.handleSwitchJob],

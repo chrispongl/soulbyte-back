@@ -7,17 +7,37 @@ import { withRpcRetry } from '../utils/rpc-retry.js';
 import { assertReceiptSuccess } from '../utils/onchain.js';
 
 export class BusinessWalletService {
-    private providerPromise?: Promise<ethers.JsonRpcProvider>;
+    private defaultProviderPromise?: Promise<ethers.JsonRpcProvider>;
     private sbyteContractPromise?: Promise<ethers.Contract>;
 
     constructor() {
     }
 
     private async getProvider(): Promise<ethers.JsonRpcProvider> {
-        if (!this.providerPromise) {
-            this.providerPromise = getResilientProvider();
+        if (!this.defaultProviderPromise) {
+            this.defaultProviderPromise = getResilientProvider();
         }
-        return this.providerPromise;
+        return this.defaultProviderPromise;
+    }
+
+    /**
+     * Get a provider that prefers the owner's RPC URL if configured in business.config.
+     * Falls back to the default public RPC if ownerRpcUrl is not set or fails.
+     */
+    private async getProviderForBusiness(businessId: string): Promise<ethers.JsonRpcProvider> {
+        try {
+            const business = await prisma.business.findUnique({
+                where: { id: businessId },
+                select: { config: true }
+            });
+            const ownerRpcUrl = (business?.config as any)?.ownerRpcUrl;
+            if (ownerRpcUrl && typeof ownerRpcUrl === 'string') {
+                return getResilientProvider(ownerRpcUrl);
+            }
+        } catch (err) {
+            console.warn(`Failed to read owner RPC for business ${businessId}, using default`, err);
+        }
+        return this.getProvider();
     }
 
     private async getSbyteContract(): Promise<ethers.Contract> {
@@ -56,7 +76,7 @@ export class BusinessWalletService {
         if (!wallet) {
             throw new Error('Business wallet not found');
         }
-        const provider = await this.getProvider();
+        const provider = await this.getProviderForBusiness(businessId);
         const privateKey = decryptPrivateKey(wallet.encryptedPk, wallet.pkNonce);
         return new ethers.Wallet(privateKey, provider);
     }
@@ -66,7 +86,7 @@ export class BusinessWalletService {
         if (!wallet) {
             throw new Error('Business wallet not found');
         }
-        const provider = await this.getProvider();
+        const provider = await this.getProviderForBusiness(businessId);
         const sbyteContract = await this.getSbyteContract();
         const monBalance = await withRpcRetry(
             () => provider.getBalance(wallet.walletAddress),

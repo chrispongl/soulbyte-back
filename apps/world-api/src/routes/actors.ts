@@ -524,6 +524,12 @@ export async function actorsRoutes(app: FastifyInstance) {
                 emotions: agentState.emotions ?? {},
                 archetype: agentState.archetype ?? null,
                 mood: moodLabel(persona?.mood),
+                privateEmployment: privateEmployment ? {
+                    businessId: privateEmployment.businessId,
+                    businessName: privateEmployment.business?.name ?? null,
+                    businessType: privateEmployment.business?.businessType ?? null,
+                    salaryDaily: privateEmployment.salaryDaily ? Number(privateEmployment.salaryDaily) : null
+                } : null,
                 housing: {
                     status: housingStatus,
                     propertyId: tenantProperty?.id ?? null,

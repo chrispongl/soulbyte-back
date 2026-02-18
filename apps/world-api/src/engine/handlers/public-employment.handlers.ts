@@ -95,6 +95,13 @@ export const handleApplyPublicJob: IntentHandler = async (intent, actor, agentSt
     if (existingJob && existingJob.endedAtTick === null) {
         return fail(actor.id, EventType.EVENT_PUBLIC_JOB_APPLIED, 'Already has a public job');
     }
+    const activePrivateJob = await prisma.privateEmployment.findFirst({
+        where: { agentId: actor.id, status: 'ACTIVE' },
+        select: { id: true }
+    });
+    if (activePrivateJob) {
+        return fail(actor.id, EventType.EVENT_PUBLIC_JOB_APPLIED, 'Already has a private job');
+    }
 
     // Check public place exists and is in same city
     const publicPlace = await prisma.publicPlace.findUnique({
@@ -214,7 +221,11 @@ export const handleApplyPublicJob: IntentHandler = async (intent, actor, agentSt
 // ============================================================================
 
 export const handleResignPublicJob: IntentHandler = async (intent, actor, agentState, wallet, tick) => {
-    const params = intent.params as { reason?: string };
+    const params = intent.params as {
+        reason?: string;
+        businessStartupPlan?: Record<string, unknown>;
+        businessStartupCooldownUntilTick?: number;
+    };
 
     // Check if has a public job
     const employment = await prisma.publicEmployment.findUnique({
@@ -229,6 +240,15 @@ export const handleResignPublicJob: IntentHandler = async (intent, actor, agentS
         return fail(actor.id, EventType.EVENT_PUBLIC_JOB_RESIGNED, 'Cannot resign while working');
     }
 
+    const existingMarkers = (agentState as any)?.markers ?? {};
+    const markerUpdate = params.businessStartupPlan
+        ? {
+            ...existingMarkers,
+            nextBusinessIntent: params.businessStartupPlan,
+            businessStartupCooldownUntilTick: params.businessStartupCooldownUntilTick ?? existingMarkers.businessStartupCooldownUntilTick
+        }
+        : null;
+
     return {
         stateUpdates: [{
             table: 'publicEmployment',
@@ -241,7 +261,10 @@ export const handleResignPublicJob: IntentHandler = async (intent, actor, agentS
             table: 'agentState',
             operation: 'update',
             where: { actorId: actor.id },
-            data: { lastJobChangeTick: tick }
+            data: {
+                lastJobChangeTick: tick,
+                ...(markerUpdate ? { markers: markerUpdate } : {})
+            }
         }],
         events: [{
             actorId: actor.id,

@@ -565,9 +565,6 @@ export const handleFoundBusiness: IntentHandler = async (intent, actor, agentSta
         return fail(actor.id, intentEventType, `Wealth tier too low (${config.minWealth})`);
     }
     const fullActor = await prisma.actor.findUnique({ where: { id: actor.id } });
-    if (Number(fullActor?.reputation || 0) < 150) {
-        return fail(actor.id, intentEventType, 'Reputation too low');
-    }
 
     const existing = await prisma.business.findFirst({
         where: { ownerId: actor.id, businessType: params.businessType }
@@ -734,48 +731,58 @@ export const handleFoundBusiness: IntentHandler = async (intent, actor, agentSta
     }
 
     const stateUpdates: StateUpdate[] = [
-            {
-                table: 'business',
-                operation: 'create',
-                data: {
-                    id: businessId,
-                    name: businessName,
-                    businessType: params.businessType,
-                    ownerId: actor.id,
-                    cityId: params.cityId,
-                    landId: params.landId,
-                    reputation: 100,
-                    level: 1,
-                    maxEmployees: config.employeesL1,
-                    treasury: injectedSbyte,
-                    qualityScore: 50,
-                    isOpen: true,
-                    foundedTick: tick,
-                    status: 'ACTIVE',
-                    config: {}
-                }
-            },
-            {
-                table: 'businessWallet',
-                operation: 'create',
-                data: {
-                    businessId,
-                    walletAddress: businessWallet.address,
-                    encryptedPk: encrypted,
-                    pkNonce: nonce,
-                    balanceSbyte: injectedSbyte,
-                    balanceMon: minCap.mon
-                }
-            },
-            {
-                table: 'property',
-                operation: 'update',
-                where: { id: params.landId },
-                data: isHouseConversion
-                    ? { forSale: false, forRent: false, tenantId: null }
-                    : { isEmptyLot: false }
+        {
+            table: 'business',
+            operation: 'create',
+            data: {
+                id: businessId,
+                name: businessName,
+                businessType: params.businessType,
+                ownerId: actor.id,
+                cityId: params.cityId,
+                landId: params.landId,
+                reputation: 100,
+                level: 1,
+                maxEmployees: config.employeesL1,
+                treasury: injectedSbyte,
+                qualityScore: 50,
+                isOpen: true,
+                foundedTick: tick,
+                status: 'ACTIVE',
+                config: {}
             }
-        ];
+        },
+        {
+            table: 'businessWallet',
+            operation: 'create',
+            data: {
+                businessId,
+                walletAddress: businessWallet.address,
+                encryptedPk: encrypted,
+                pkNonce: nonce,
+                balanceSbyte: injectedSbyte,
+                balanceMon: minCap.mon
+            }
+        },
+        {
+            table: 'property',
+            operation: 'update',
+            where: { id: params.landId },
+            data: isHouseConversion
+                ? { forSale: false, forRent: false, tenantId: null }
+                : { isEmptyLot: false }
+        }
+    ];
+
+    const existingMarkers = (agentState as any)?.markers ?? {};
+    if (existingMarkers?.nextBusinessIntent) {
+        stateUpdates.push({
+            table: 'agentState',
+            operation: 'update',
+            where: { actorId: actor.id },
+            data: { markers: { ...existingMarkers, nextBusinessIntent: null } }
+        });
+    }
 
     if (skipOnchain) {
         stateUpdates.push(
@@ -1100,11 +1107,38 @@ export const handleHireEmployee: IntentHandler = async (intent, actor, _agentSta
     if (!params?.businessId || !params.targetAgentId || !params.offeredSalary) {
         return fail(actor.id, EventType.EVENT_EMPLOYEE_HIRED, 'Missing params');
     }
-    const business = await prisma.business.findUnique({ where: { id: params.businessId } });
+    const business = await prisma.business.findUnique({
+        where: { id: params.businessId },
+        select: { id: true, ownerId: true, maxEmployees: true, name: true, businessType: true }
+    });
     if (!business || business.ownerId !== actor.id) return fail(actor.id, EventType.EVENT_EMPLOYEE_HIRED, 'Not owner');
 
-    return {
-        stateUpdates: [{
+    const activePublicEmployment = await prisma.publicEmployment.findUnique({
+        where: { actorId: params.targetAgentId }
+    });
+
+    const activeEmployees = await prisma.privateEmployment.count({
+        where: { businessId: business.id, status: 'ACTIVE' }
+    });
+    if (activeEmployees >= Number(business.maxEmployees ?? 0)) {
+        return fail(actor.id, EventType.EVENT_EMPLOYEE_HIRED, 'Business at max employees');
+    }
+
+    const existingEmployment = await prisma.privateEmployment.findUnique({
+        where: { businessId_agentId: { businessId: business.id, agentId: params.targetAgentId } }
+    });
+    if (existingEmployment?.status === 'ACTIVE') {
+        return fail(actor.id, EventType.EVENT_EMPLOYEE_HIRED, 'Already employed');
+    }
+
+    const employmentUpdate: StateUpdate = existingEmployment
+        ? {
+            table: 'privateEmployment',
+            operation: 'update',
+            where: { businessId_agentId: { businessId: business.id, agentId: params.targetAgentId } },
+            data: { status: 'ACTIVE', hiredTick: tick, salaryDaily: params.offeredSalary }
+        }
+        : {
             table: 'privateEmployment',
             operation: 'create',
             data: {
@@ -1112,16 +1146,45 @@ export const handleHireEmployee: IntentHandler = async (intent, actor, _agentSta
                 agentId: params.targetAgentId,
                 salaryDaily: params.offeredSalary,
                 hiredTick: tick,
-                status: 'OFFERED'
+                status: 'ACTIVE'
             }
-        }],
-        events: [{
-            actorId: actor.id,
-            type: EventType.EVENT_EMPLOYEE_HIRED,
-            targetIds: [params.targetAgentId],
-            outcome: EventOutcome.SUCCESS,
-            sideEffects: { businessId: business.id, offeredSalary: params.offeredSalary }
-        }],
+        };
+
+    const publicEmploymentEndUpdate: StateUpdate | null = activePublicEmployment && activePublicEmployment.endedAtTick === null
+        ? {
+            table: 'publicEmployment',
+            operation: 'update',
+            where: { actorId: params.targetAgentId },
+            data: { endedAtTick: tick }
+        }
+        : null;
+    return {
+        stateUpdates: [
+            employmentUpdate,
+            {
+                table: 'agentState',
+                operation: 'update',
+                where: { actorId: params.targetAgentId },
+                data: { lastJobChangeTick: tick }
+            },
+            ...(publicEmploymentEndUpdate ? [publicEmploymentEndUpdate] : [])
+        ],
+        events: [
+            {
+                actorId: actor.id,
+                type: EventType.EVENT_EMPLOYEE_HIRED,
+                targetIds: [params.targetAgentId],
+                outcome: EventOutcome.SUCCESS,
+                sideEffects: { businessId: business.id, offeredSalary: params.offeredSalary }
+            },
+            {
+                actorId: params.targetAgentId,
+                type: EventType.EVENT_PRIVATE_JOB_ACCEPTED,
+                targetIds: [business.id],
+                outcome: EventOutcome.SUCCESS,
+                sideEffects: { businessId: business.id, businessName: business.name }
+            }
+        ],
         intentStatus: IntentStatus.EXECUTED
     };
 };
@@ -1240,12 +1303,20 @@ export const handleAcceptJob: IntentHandler = async (intent, actor, agentState, 
         return fail(actor.id, EventType.EVENT_EMPLOYEE_HIRED, 'Offer below expectation');
     }
     return {
-        stateUpdates: [{
-            table: 'privateEmployment',
-            operation: 'update',
-            where: { businessId_agentId: { businessId: params.businessId, agentId: actor.id } },
-            data: { status: 'ACTIVE', hiredTick: tick, salaryDaily: offeredSalary.toNumber() }
-        }],
+        stateUpdates: [
+            {
+                table: 'privateEmployment',
+                operation: 'update',
+                where: { businessId_agentId: { businessId: params.businessId, agentId: actor.id } },
+                data: { status: 'ACTIVE', hiredTick: tick, salaryDaily: offeredSalary.toNumber() }
+            },
+            {
+                table: 'agentState',
+                operation: 'update',
+                where: { actorId: actor.id },
+                data: { lastJobChangeTick: tick }
+            }
+        ],
         events: [{
             actorId: actor.id,
             type: EventType.EVENT_PRIVATE_JOB_ACCEPTED,
@@ -1390,8 +1461,13 @@ export const handleFireEmployee: IntentHandler = async (intent, actor, _agentSta
     };
 };
 
-export const handleQuitJob: IntentHandler = async (intent, actor, _agentState, _wallet, tick) => {
-    const params = intent.params as { businessId?: string };
+export const handleQuitJob: IntentHandler = async (intent, actor, agentState, _wallet, tick) => {
+    const params = intent.params as {
+        businessId?: string;
+        reason?: string;
+        businessStartupPlan?: Record<string, unknown>;
+        businessStartupCooldownUntilTick?: number;
+    };
     if (!params?.businessId) return fail(actor.id, EventType.EVENT_EMPLOYEE_QUIT, 'Missing businessId');
     const business = await prisma.business.findUnique({ where: { id: params.businessId } });
     if (!business) return fail(actor.id, EventType.EVENT_EMPLOYEE_QUIT, 'Business not found');
@@ -1437,6 +1513,15 @@ export const handleQuitJob: IntentHandler = async (intent, actor, _agentState, _
         }
     }
 
+    const existingMarkers = (agentState as any)?.markers ?? {};
+    const markerUpdate = params.businessStartupPlan
+        ? {
+            ...existingMarkers,
+            nextBusinessIntent: params.businessStartupPlan,
+            businessStartupCooldownUntilTick: params.businessStartupCooldownUntilTick ?? existingMarkers.businessStartupCooldownUntilTick
+        }
+        : null;
+
     return {
         stateUpdates: [
             {
@@ -1449,7 +1534,10 @@ export const handleQuitJob: IntentHandler = async (intent, actor, _agentState, _
                 table: 'agentState',
                 operation: 'update',
                 where: { actorId: actor.id },
-                data: { lastJobChangeTick: tick }
+                data: {
+                    lastJobChangeTick: tick,
+                    ...(markerUpdate ? { markers: markerUpdate } : {})
+                }
             },
             ...(owedSalary.greaterThan(0)
                 ? [
@@ -2383,7 +2471,8 @@ export const handleSetHouseEdge: IntentHandler = async (intent, actor) => {
         return fail(actor.id, EventType.EVENT_BUSINESS_REVENUE_EARNED, 'Not a casino owner');
     }
     const config = (business.config || {}) as Record<string, unknown>;
-    config.houseEdge = params.houseEdge;
+    // Clamp house edge to 1-10% range
+    config.houseEdge = Math.max(1, Math.min(10, Number(params.houseEdge)));
     return {
         stateUpdates: [{ table: 'business', operation: 'update', where: { id: business.id }, data: { config } }],
         events: [],
@@ -2405,17 +2494,213 @@ export const handleHostEvent: IntentHandler = async (intent, actor) => {
     };
 };
 
-export const handleVisitBusiness: IntentHandler = async (intent, actor, agentState, wallet, tick) => {
-    const params = intent.params as { businessId?: string };
+export const handleVisitBusiness: IntentHandler = async (intent, actor, agentState, wallet, tick, seed) => {
+    const params = intent.params as { businessId?: string; bet?: number };
     if (!params?.businessId) return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Missing businessId');
     const business = await prisma.business.findUnique({ where: { id: params.businessId } });
     if (!business || !business.isOpen) return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Business closed');
     if (!wallet) return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'No wallet');
     if (agentState?.cityId !== business.cityId) return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Wrong city');
     if (!agentState) return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'No agent state');
+
+    // Gambling hard cap: 40 games per sim-day across all gambling types
+    const gamesToday = (agentState as any)?.gamesToday ?? 0;
+    if (business.businessType === 'CASINO' && gamesToday >= 40) {
+        return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Daily gambling limit reached (40)');
+    }
+
     const bWallet = await prisma.businessWallet.findUnique({ where: { businessId: business.id } });
     if (!bWallet) return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Business wallet missing');
 
+    // ========== CASINO GAMBLING BRANCH ==========
+    if (business.businessType === 'CASINO') {
+        const config = (business.config || {}) as Record<string, any>;
+        const houseEdge = Math.max(1, Math.min(10, Number(config.houseEdge ?? 7))); // 1-10%
+        const minBet = 100;
+        const maxBet = 300;
+        const seedBet = minBet + Math.floor(Number(seed % BigInt(maxBet - minBet + 1)));
+        const betAmount = Math.max(minBet, Math.min(maxBet, Number(params.bet ?? seedBet)));
+        const playerBalance = new Decimal(wallet.balanceSbyte.toString());
+        if (playerBalance.lessThan(betAmount)) {
+            return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Insufficient funds for casino bet');
+        }
+        const houseTreasury = Number(business.treasury);
+
+        // Deterministic win/loss using seed
+        const roll = Number(seed % BigInt(100));
+        const winChance = 100 - (houseEdge * 10); // houseEdge 7% => 30% win chance (scaling for meaningful gameplay)
+        const playerWins = roll < winChance;
+
+        const useQueue = process.env.ENABLE_ONCHAIN_QUEUE === 'true';
+        const stateUpdates: StateUpdate[] = [];
+        const jobUpdates: StateUpdate[] = [];
+        let txHash: string | null = null;
+
+        let cityFeeBps = FEE_CONFIG.CITY_FEE_DEFAULT_BPS;
+        const cityPolicy = await prisma.cityPolicy.findUnique({ where: { cityId: business.cityId } });
+        if (cityPolicy) cityFeeBps = Number(cityPolicy.cityFeeBps);
+
+        if (playerWins) {
+            // Win: payout = bet x multiplier (2x-5x), from house wallet
+            const multiplier = 2 + Number(seed % BigInt(4)); // 2-5x
+            const grossPayout = betAmount * multiplier;
+            const actualPayout = Math.min(grossPayout, houseTreasury * 0.1); // Cap at 10% of house treasury
+            if (actualPayout <= 0) {
+                return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Casino house cannot cover payout');
+            }
+
+            const payoutFees = calculateFees(ethers.parseEther(actualPayout.toString()), cityFeeBps);
+            const netPayout = Number(ethers.formatEther(payoutFees.netAmount));
+            const feePlatform = Number(ethers.formatEther(payoutFees.platformFee));
+            const feeCity = Number(ethers.formatEther(payoutFees.cityFee));
+
+            if (useQueue) {
+                const agentWallet = await prisma.agentWallet.findUnique({ where: { actorId: actor.id } });
+                if (!agentWallet) {
+                    return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Target wallet missing');
+                }
+                const job = createOnchainJobUpdate({
+                    jobType: 'BUSINESS_TRANSFER_SBYTE',
+                    payload: {
+                        businessId: business.id,
+                        toAddress: agentWallet.walletAddress,
+                        amountWei: ethers.parseEther(actualPayout.toString()).toString(),
+                    },
+                    actorId: actor.id,
+                    relatedIntentId: intent.id,
+                });
+                jobUpdates.push(job.update);
+            } else {
+                try {
+                    const agentWallet = await prisma.agentWallet.findUnique({ where: { actorId: actor.id } });
+                    if (agentWallet) {
+                        const payoutTx = await businessWalletService.transferFromBusiness(
+                            business.id,
+                            agentWallet.walletAddress,
+                            ethers.parseEther(actualPayout.toString())
+                        );
+                        txHash = payoutTx.txHash;
+                    }
+                } catch (err) {
+                    console.warn(`Casino payout transfer failed for ${business.id}`, err);
+                    txHash = `0x${crypto.randomBytes(32).toString('hex')}`;
+                }
+            }
+
+            stateUpdates.push(
+                { table: 'business', operation: 'update', where: { id: business.id }, data: { treasury: { decrement: actualPayout }, customerVisitsToday: { increment: 1 } } },
+                { table: 'businessWallet', operation: 'update', where: { businessId: business.id }, data: { balanceSbyte: { decrement: actualPayout } } },
+                { table: 'wallet', operation: 'update', where: { actorId: actor.id }, data: { balanceSbyte: { increment: netPayout } } },
+                { table: 'agentWallet', operation: 'update', where: { actorId: actor.id }, data: { balanceSbyte: { increment: netPayout } } },
+                {
+                    table: 'transaction', operation: 'create', data: {
+                        fromActorId: business.ownerId, toActorId: actor.id,
+                        amount: actualPayout, feePlatform, feeCity,
+                        cityId: business.cityId, tick, reason: 'CASINO_WIN_PAYOUT',
+                        onchainTxHash: txHash,
+                        metadata: { businessId: business.id, businessName: business.name, bet: betAmount, multiplier, grossPayout, actualPayout }
+                    }
+                },
+                {
+                    table: 'agentState', operation: 'update', where: { actorId: actor.id }, data: {
+                        fun: Math.min(agentState.fun + 55, 100),
+                        social: Math.min(agentState.social + 10, 100),
+                        gamesToday: { increment: 1 },
+                        lastGameTick: tick,
+                    }
+                },
+                // Reputation boost: business +1, owner +0.5 (rounded to 1)
+                { table: 'business', operation: 'update', where: { id: business.id }, data: { reputation: { increment: 1 } } },
+                { table: 'actor', operation: 'update', where: { id: business.ownerId }, data: { reputation: { increment: 1 } } }
+            );
+
+            return {
+                stateUpdates: stateUpdates.concat(jobUpdates),
+                events: [{
+                    actorId: actor.id,
+                    type: EventType.EVENT_BUSINESS_CUSTOMER_VISIT,
+                    targetIds: [business.id],
+                    outcome: EventOutcome.SUCCESS,
+                    sideEffects: { casinoResult: 'WIN', bet: betAmount, multiplier, payout: actualPayout, netPayout, txHash, queued: useQueue }
+                }],
+                intentStatus: useQueue ? IntentStatus.QUEUED : IntentStatus.EXECUTED
+            };
+        } else {
+            // Loss: bet goes to house wallet
+            if (useQueue) {
+                const job = createOnchainJobUpdate({
+                    jobType: 'AGENT_TRANSFER_SBYTE',
+                    payload: {
+                        fromActorId: actor.id,
+                        toActorId: null,
+                        amountWei: ethers.parseEther(betAmount.toString()).toString(),
+                        reason: 'casino_loss',
+                        cityId: business.cityId,
+                        toAddressOverride: bWallet.walletAddress,
+                    },
+                    actorId: actor.id,
+                    relatedIntentId: intent.id,
+                });
+                jobUpdates.push(job.update);
+            } else {
+                try {
+                    const tx = await agentTransferService.transfer(
+                        actor.id, null,
+                        ethers.parseEther(betAmount.toString()),
+                        'casino_loss', business.cityId, bWallet.walletAddress
+                    );
+                    txHash = tx.txHash;
+                } catch (err) {
+                    console.warn(`Casino bet transfer failed for ${business.id}`, err);
+                    txHash = `0x${crypto.randomBytes(32).toString('hex')}`;
+                }
+            }
+
+            const betFees = calculateFees(ethers.parseEther(betAmount.toString()), cityFeeBps);
+            const netBet = Number(ethers.formatEther(betFees.netAmount));
+            const feePlatform = Number(ethers.formatEther(betFees.platformFee));
+            const feeCity = Number(ethers.formatEther(betFees.cityFee));
+
+            stateUpdates.push(
+                { table: 'business', operation: 'update', where: { id: business.id }, data: { treasury: { increment: netBet }, customerVisitsToday: { increment: 1 } } },
+                { table: 'businessWallet', operation: 'update', where: { businessId: business.id }, data: { balanceSbyte: { increment: netBet } } },
+                {
+                    table: 'transaction', operation: 'create', data: {
+                        fromActorId: actor.id, toActorId: business.ownerId ?? null,
+                        amount: betAmount, feePlatform, feeCity,
+                        cityId: business.cityId, tick, reason: 'CASINO_BET_LOST',
+                        onchainTxHash: txHash,
+                        metadata: { businessId: business.id, businessName: business.name, bet: betAmount, casinoResult: 'LOSS' }
+                    }
+                },
+                {
+                    table: 'agentState', operation: 'update', where: { actorId: actor.id }, data: {
+                        fun: Math.min(agentState.fun + 40, 100),
+                        social: Math.min(agentState.social + 5, 100),
+                        gamesToday: { increment: 1 },
+                        lastGameTick: tick,
+                    }
+                },
+                // Reputation boost: business +1, owner +0.5 (rounded to 1)
+                { table: 'business', operation: 'update', where: { id: business.id }, data: { reputation: { increment: 1 } } },
+                { table: 'actor', operation: 'update', where: { id: business.ownerId }, data: { reputation: { increment: 1 } } }
+            );
+
+            return {
+                stateUpdates: stateUpdates.concat(jobUpdates),
+                events: [{
+                    actorId: actor.id,
+                    type: EventType.EVENT_BUSINESS_CUSTOMER_VISIT,
+                    targetIds: [business.id],
+                    outcome: EventOutcome.SUCCESS,
+                    sideEffects: { casinoResult: 'LOSS', bet: betAmount, txHash, queued: useQueue }
+                }],
+                intentStatus: useQueue ? IntentStatus.QUEUED : IntentStatus.EXECUTED
+            };
+        }
+    }
+
+    // ========== STANDARD BUSINESS VISIT (non-casino) ==========
     const price = new Decimal(((business.config as any)?.pricePerService ?? 20));
     if (new Decimal(wallet.balanceSbyte.toString()).lessThan(price)) {
         return fail(actor.id, EventType.EVENT_BUSINESS_CUSTOMER_VISIT, 'Insufficient funds');
@@ -2427,7 +2712,6 @@ export const handleVisitBusiness: IntentHandler = async (intent, actor, agentSta
         ENTERTAINMENT: { fun: 40, social: 15, purpose: 10 },
         CLINIC: { health: 30 },
         GYM: { health: 10, purpose: 15 },
-        CASINO: { fun: 20 }
     };
     const effects = needEffects[business.businessType] || {};
 
@@ -2503,6 +2787,7 @@ export const handleVisitBusiness: IntentHandler = async (intent, actor, agentSta
                     onchainTxHash: txHash,
                     metadata: {
                         businessId: business.id,
+                        businessName: business.name,
                         businessType: business.businessType,
                         price: price.toNumber(),
                         onchainTxHash: txHash
@@ -2520,7 +2805,10 @@ export const handleVisitBusiness: IntentHandler = async (intent, actor, agentSta
                     social: effects.social ? Math.min(agentState.social + effects.social, 100) : agentState.social,
                     purpose: effects.purpose ? Math.min(agentState.purpose + effects.purpose, 100) : agentState.purpose,
                 }
-            }
+            },
+            // Reputation boost per visit: business +1, owner +1
+            { table: 'business', operation: 'update', where: { id: business.id }, data: { reputation: { increment: 1 } } },
+            { table: 'actor', operation: 'update', where: { id: business.ownerId }, data: { reputation: { increment: 1 } } }
         ].concat(jobUpdates),
         events: [{
             actorId: actor.id,
@@ -2645,13 +2933,14 @@ export const handleBuyStoreItem: IntentHandler = async (intent, actor, agentStat
                 cityId: business.cityId,
                 tick,
                 reason: 'STORE_PURCHASE',
-                    onchainTxHash: txHash,
+                onchainTxHash: txHash,
                 metadata: {
                     businessId: business.id,
+                    businessName: business.name,
                     itemDefId: itemDef.id,
                     quantity,
                     totalPrice: totalPrice.toNumber(),
-                        onchainTxHash: txHash
+                    onchainTxHash: txHash
                 }
             }
         },
@@ -2684,6 +2973,62 @@ export const handleBuyStoreItem: IntentHandler = async (intent, actor, agentStat
             }
         }],
         intentStatus: useQueue ? IntentStatus.QUEUED : IntentStatus.EXECUTED
+    };
+};
+
+/**
+ * Handle INTENT_TRANSFER_MON_TO_BUSINESS
+ * Owner transfers MON (native token) to their business wallet for gas funding.
+ */
+export const handleTransferMonToBusiness: IntentHandler = async (intent, actor, agentState, wallet, tick) => {
+    const params = intent.params as { businessId?: string; amount?: number };
+    if (!params?.businessId) return fail(actor.id, EventType.EVENT_BUSINESS_REVENUE_EARNED, 'Missing businessId');
+    const amount = Number(params.amount ?? 2); // Default 2 MON
+    if (amount <= 0 || amount > 10) return fail(actor.id, EventType.EVENT_BUSINESS_REVENUE_EARNED, 'Invalid MON amount (0-10)');
+
+    const business = await prisma.business.findUnique({ where: { id: params.businessId } });
+    if (!business || business.ownerId !== actor.id) {
+        return fail(actor.id, EventType.EVENT_BUSINESS_REVENUE_EARNED, 'Not business owner');
+    }
+    const bWallet = await prisma.businessWallet.findUnique({ where: { businessId: business.id } });
+    if (!bWallet) return fail(actor.id, EventType.EVENT_BUSINESS_REVENUE_EARNED, 'Business wallet missing');
+
+    // Transfer MON from owner wallet to business wallet on-chain
+    let txHash: string | null = null;
+    if (process.env.SKIP_ONCHAIN_EXECUTION !== 'true') {
+        try {
+            const ownerSigner = await walletService.getSignerWallet(actor.id);
+            const tx = await ownerSigner.sendTransaction({
+                to: bWallet.walletAddress,
+                value: ethers.parseEther(amount.toString())
+            });
+            const receipt = await tx.wait();
+            txHash = tx.hash;
+        } catch (err) {
+            console.warn(`MON transfer to business failed for ${business.id}`, err);
+            return fail(actor.id, EventType.EVENT_BUSINESS_REVENUE_EARNED, 'MON transfer failed on-chain');
+        }
+    } else {
+        txHash = `0x${crypto.randomBytes(32).toString('hex')}`;
+    }
+
+    return {
+        stateUpdates: [
+            {
+                table: 'businessWallet',
+                operation: 'update',
+                where: { businessId: business.id },
+                data: { balanceMon: { increment: amount } }
+            }
+        ],
+        events: [{
+            actorId: actor.id,
+            type: EventType.EVENT_BUSINESS_REVENUE_EARNED,
+            targetIds: [business.id],
+            outcome: EventOutcome.SUCCESS,
+            sideEffects: { monAmount: amount, txHash, reason: 'MON_TOP_UP' }
+        }],
+        intentStatus: IntentStatus.EXECUTED
     };
 };
 

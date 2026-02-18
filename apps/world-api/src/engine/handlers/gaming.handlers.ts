@@ -605,8 +605,8 @@ export const handleAcceptGame: IntentHandler = async (intent, actor, agentState,
                     accepterScore,
                     winnings: winnings.toNumber(),
                     platformFee: platformFee.toNumber(),
-                onChain: true,
-                queued: useQueue
+                    onChain: true,
+                    queued: useQueue
                 }
             }
         ],
@@ -692,7 +692,7 @@ export const handleRejectGame: IntentHandler = async (intent, actor, agentState,
                     tick,
                     reason: 'gaming_pvp_refund',
                     onchainTxHash: refundTx.txHash,
-                metadata: { stake, role: 'challenger_refund', onchainJobIds: jobIds }
+                    metadata: { stake, role: 'challenger_refund', onchainJobIds: jobIds }
                 }
             }
         ];
@@ -747,6 +747,11 @@ export const handlePlayGame: IntentHandler = async (intent, actor, agentState, w
     }
     if (!agentState || agentState.energy < GAMING_CONFIG.ENERGY_COST) {
         return fail(actor.id, EventType.EVENT_GAME_RESULT, 'Insufficient energy');
+    }
+    // Gambling hard cap: 40 games per sim-day across all gambling types
+    const gamesToday = (agentState as any)?.gamesToday ?? 0;
+    if (gamesToday >= 40) {
+        return fail(actor.id, EventType.EVENT_GAME_RESULT, 'Daily gambling limit reached (40)');
     }
     const requestedStake = Number(params.stake ?? GAMING_CONFIG.MIN_STAKE);
     const maxAllowedStake = wallet ? getMaxStakeForBalance(Number(wallet.balanceSbyte)) : 0;
@@ -983,6 +988,11 @@ export const handleBet: IntentHandler = async (intent, actor, agentState, wallet
     if (!agentState || agentState.activityState !== 'IDLE') {
         return fail(actor.id, EventType.EVENT_GAME_RESULT, 'Actor is busy');
     }
+    // Gambling hard cap: 40 games per sim-day across all gambling types
+    const betGamesToday = (agentState as any)?.gamesToday ?? 0;
+    if (betGamesToday >= 40) {
+        return fail(actor.id, EventType.EVENT_GAME_RESULT, 'Daily gambling limit reached (40)');
+    }
 
     const requestedBet = Number(params?.betAmount ?? GAMING_CONFIG.MIN_STAKE);
     const maxAllowedBet = wallet ? getMaxStakeForBalance(Number(wallet.balanceSbyte)) : 0;
@@ -1091,7 +1101,7 @@ export const handleBet: IntentHandler = async (intent, actor, agentState, wallet
             table: 'agentState',
             operation: 'update',
             where: { actorId: actor.id },
-            data: { fun: { increment: won ? 8 : 4 } }
+            data: { fun: { increment: won ? 8 : 4 }, gamesToday: { increment: 1 }, lastGameTick: _tick }
         },
         {
             table: 'transaction',

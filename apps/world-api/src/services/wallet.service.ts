@@ -10,6 +10,7 @@ import { CONTRACTS, ERC20_ABI } from '../config/contracts.js';
 import { getResilientProvider } from '../config/network.js';
 import { withRpcRetry } from '../utils/rpc-retry.js';
 import { formatSbyteForLedger } from '../utils/amounts.js';
+import { getWealthTierFromBalance } from '../utils/wealth-tier.js';
 
 /**
  * Get encryption key from environment
@@ -253,11 +254,15 @@ export class WalletService {
             'walletSyncBlockNumber'
         );
 
+        const sbyteFormatted = ethers.formatUnits(sbyteBalance, 18);
+        const sbyteLedger = formatSbyteForLedger(sbyteFormatted);
+        const wealthTier = getWealthTierFromBalance(sbyteLedger);
+
         await prisma.agentWallet.update({
             where: { actorId },
             data: {
                 balanceMon: ethers.formatEther(monBalance),
-                balanceSbyte: ethers.formatUnits(sbyteBalance, 18),
+                balanceSbyte: sbyteFormatted,
                 lastSyncedAt: new Date(),
                 lastSyncedBlock: BigInt(currentBlock),
             },
@@ -267,8 +272,13 @@ export class WalletService {
         await prisma.wallet.update({
             where: { actorId },
             data: {
-                balanceSbyte: formatSbyteForLedger(ethers.formatUnits(sbyteBalance, 18)),
+                balanceSbyte: sbyteLedger,
             },
+        });
+
+        await prisma.agentState.updateMany({
+            where: { actorId },
+            data: { wealthTier },
         });
     }
 

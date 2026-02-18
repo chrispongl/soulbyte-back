@@ -492,7 +492,8 @@ export class WorldReader {
                 lastBigLossTick: stateAny.lastBigLossTick ?? 0,
                 totalGamesPlayed: stateAny.totalGamesPlayed ?? 0,
                 totalGamesWon: stateAny.totalGamesWon ?? 0,
-                noGamesUntilTick: Number(stateAny?.emotions?.noGamesUntilTick ?? 0)
+                noGamesUntilTick: Number(stateAny?.emotions?.noGamesUntilTick ?? 0),
+                markers: (stateAny?.markers as Record<string, unknown> | null) ?? {}
             },
             needs: {
                 health: stateAny.health,
@@ -532,15 +533,16 @@ export class WorldReader {
                     condition: p.condition ?? 100,
                     neighborhoodScore: p.neighborhoodScore ?? 0,
                     forRent: p.forRent,
-                    forSale: p.forSale
+                    forSale: p.forSale,
+                    isEmptyLot: p.isEmptyLot ?? false
                 })),
-            emptyLots: ownedEmptyLots.map(p => ({
-                id: p.id,
-                cityId: p.cityId,
-                lotType: p.lotType ?? 'UNKNOWN',
-                maxBuildTier: p.maxBuildTier ?? null,
-                underConstruction: p.underConstruction ?? false,
-            })),
+                emptyLots: ownedEmptyLots.map(p => ({
+                    id: p.id,
+                    cityId: p.cityId,
+                    lotType: p.lotType ?? 'UNKNOWN',
+                    maxBuildTier: p.maxBuildTier ?? null,
+                    underConstruction: p.underConstruction ?? false,
+                })),
                 forSale: propertiesForSale.map(p => ({
                     id: p.id,
                     cityId: p.cityId,

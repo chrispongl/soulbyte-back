@@ -22,28 +22,45 @@ export class LeisureDomain {
         );
         const publicFunPlace = publicFunPlaces[0] ?? null;
 
-        // 1. VISIT ENTERTAINMENT / CASINO / TAVERN
+        // Personality-based casino affinity: riskTolerance drives casino preference
+        const riskTolerance = ctx.personality.riskTolerance ?? 50;
+        const casinoAffinityBoost = Math.max(0, (riskTolerance - 30) * 0.3); // 0-21 range
+
+        // Whether agent can visit casinos (not on cooldown)
+        const canVisitCasino = !(ctx.state.noGamesUntilTick && ctx.tick < ctx.state.noGamesUntilTick);
+
+        // 1. VISIT ENTERTAINMENT / CASINO / TAVERN (urgent fun)
         if (funUrgency && funUrgency.urgency >= UrgencyLevel.LOW) {
-            // Find entertainment businesses
             const funPlaces = ctx.businesses.inCity.filter(b =>
-                (ctx.state.noGamesUntilTick && ctx.tick < ctx.state.noGamesUntilTick)
-                    ? (b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
-                    : (b.businessType === BusinessType.CASINO || b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
+                canVisitCasino
+                    ? (b.businessType === BusinessType.CASINO || b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
+                    : (b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
             );
 
             if (funPlaces.length > 0) {
-                // Pick one randomly or by reputation
-                const place = funPlaces[0]; // Simple pick
+                // Sort: casinos first (highest fun gain), then taverns, then entertainment
+                const sorted = [...funPlaces].sort((a, b) => {
+                    const order: Record<string, number> = { CASINO: 0, TAVERN: 1, ENTERTAINMENT: 2 };
+                    return (order[a.businessType] ?? 3) - (order[b.businessType] ?? 3);
+                });
+                const place = sorted[0];
+
+                // Casinos get higher priority due to higher fun gain
+                const isCasino = place.businessType === BusinessType.CASINO;
+                const casinoBonus = isCasino ? 15 + casinoAffinityBoost : 0;
 
                 candidates.push({
                     intentType: IntentType.INTENT_VISIT_BUSINESS,
-                    params: { businessId: place.id },
-                    basePriority: 45 + ((100 - funUrgency.value) * 0.35),
+                    params: isCasino
+                        ? { businessId: place.id, bet: 100 + Math.floor(riskTolerance * 2) }
+                        : { businessId: place.id },
+                    basePriority: 45 + casinoBonus + ((100 - funUrgency.value) * 0.35),
                     personalityBoost: PersonalityWeights.getBoost(ctx.personality.creativity, true),
-                    reason: `Having fun at ${place.businessType}`,
+                    reason: isCasino
+                        ? `Gambling at casino (risk tolerance: ${riskTolerance})`
+                        : `Having fun at ${place.businessType}`,
                     domain: 'leisure',
                 });
-
             }
         }
 
@@ -66,24 +83,38 @@ export class LeisureDomain {
             }
         }
 
+        // 3. FREE TIME - Prefer casino > tavern > entertainment > PvP
         if ((!funUrgency || funUrgency.urgency === UrgencyLevel.NONE) && freeTime) {
             const funPlaces = ctx.businesses.inCity.filter(b =>
-                (ctx.state.noGamesUntilTick && ctx.tick < ctx.state.noGamesUntilTick)
-                    ? (b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
-                    : (b.businessType === BusinessType.CASINO || b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
+                canVisitCasino
+                    ? (b.businessType === BusinessType.CASINO || b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
+                    : (b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
             );
             if (funPlaces.length > 0) {
-                const place = funPlaces[0];
+                // Sort: casinos first
+                const sorted = [...funPlaces].sort((a, b) => {
+                    const order: Record<string, number> = { CASINO: 0, TAVERN: 1, ENTERTAINMENT: 2 };
+                    return (order[a.businessType] ?? 3) - (order[b.businessType] ?? 3);
+                });
+                const place = sorted[0];
+                const isCasino = place.businessType === BusinessType.CASINO;
+                const casinoBonus = isCasino ? 10 + casinoAffinityBoost : 0;
                 const freeTimeBoost = Math.max(0, (ctx.personality.creativity - 50) * 0.2);
+
                 candidates.push({
                     intentType: IntentType.INTENT_VISIT_BUSINESS,
-                    params: { businessId: place.id },
-                    basePriority: 28 + freeTimeBoost + Math.max(0, (60 - funValue) * 0.1),
+                    params: isCasino
+                        ? { businessId: place.id, bet: 100 + Math.floor(riskTolerance * 2) }
+                        : { businessId: place.id },
+                    basePriority: 28 + casinoBonus + freeTimeBoost + Math.max(0, (60 - funValue) * 0.1),
                     personalityBoost: PersonalityWeights.getBoost(ctx.personality.creativity, true),
-                    reason: `Spending free time at ${place.businessType}`,
+                    reason: isCasino
+                        ? `Free time gambling (risk: ${riskTolerance})`
+                        : `Spending free time at ${place.businessType}`,
                     domain: 'leisure',
                 });
             } else if (ctx.state.balanceSbyte >= GAMING_CONFIG.MIN_STAKE && ctx.needs.energy >= 45) {
+                // PvP fallback: only when no casino/tavern/entertainment in city
                 const hasPvpCandidate = ctx.nearbyAgents.some(agent => {
                     if (agent.id === ctx.agent.id) return false;
                     if (agent.isEnemy) return false;
@@ -128,10 +159,12 @@ export class LeisureDomain {
             freeTime,
             activityState: ctx.state.activityState,
             maxSurvivalUrgency,
+            casinoAffinityBoost,
+            canVisitCasino,
             funPlaces: ctx.businesses.inCity.filter(b =>
-                (ctx.state.noGamesUntilTick && ctx.tick < ctx.state.noGamesUntilTick)
-                    ? (b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
-                    : (b.businessType === BusinessType.CASINO || b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
+                canVisitCasino
+                    ? (b.businessType === BusinessType.CASINO || b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
+                    : (b.businessType === BusinessType.TAVERN || b.businessType === BusinessType.ENTERTAINMENT)
             ).length,
             publicFunPlaces: publicFunPlaces.length,
             candidateCount: candidates.length,

@@ -7,6 +7,7 @@ import crypto from 'crypto';
 import { processTick } from './world.engine.js';
 import { checkFreeze, reviveFrozenAgents } from './freeze.engine.js';
 import { EventType, EventOutcome } from '../types/event.types.js';
+import { IntentStatus } from '../types/intent.types.js';
 import { Decimal } from 'decimal.js';
 import { ethers } from 'ethers';
 import { processBusinessDaily } from './business.engine.js';
@@ -790,7 +791,7 @@ async function processBrainsInChunks(
                         return { actorId: agent.id, created: 0, budgetExceeded: decision.budgetExceeded ?? [] };
                         }
                     }
-                    await prisma.intent.create({
+                    const createdIntent = await prisma.intent.create({
                         data: {
                             actorId: agent.id,
                             type: decision.intentType,
@@ -800,6 +801,30 @@ async function processBrainsInChunks(
                             tick: currentTick
                         }
                     });
+                    if ((decision.params as any)?.ownerOverride) {
+                        const pendingOwnerSuggestion = await prisma.intent.findFirst({
+                            where: {
+                                actorId: agent.id,
+                                status: 'pending',
+                                params: { path: ['source'], equals: 'owner_suggestion' }
+                            },
+                            orderBy: { createdAt: 'desc' }
+                        });
+                        if (pendingOwnerSuggestion) {
+                            const params = (pendingOwnerSuggestion.params as any) ?? {};
+                            await prisma.intent.update({
+                                where: { id: pendingOwnerSuggestion.id },
+                                data: {
+                                    status: IntentStatus.REWRITTEN,
+                                    params: {
+                                        ...params,
+                                        rewrittenToIntentId: createdIntent.id,
+                                        rewrittenAtTick: currentTick
+                                    }
+                                }
+                            });
+                        }
+                    }
                     return { actorId: agent.id, created: 1, budgetExceeded: decision.budgetExceeded ?? [] };
                 }
                 return { actorId: agent.id, created: 0, budgetExceeded: decision.budgetExceeded ?? [] };

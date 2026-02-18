@@ -3,15 +3,88 @@ import { PersonalityWeights } from '../personality-weights.js';
 import { BusinessType } from '../../../../../../generated/prisma/index.js';
 import { REAL_DAY_TICKS } from '../../../config/time.js';
 
+const SIM_MONTH_TICKS = 30 * REAL_DAY_TICKS;
+const CRITICAL_SBYTE_THRESHOLD = 10000;
+const CRITICAL_MON_THRESHOLD = 1;
+const DEFAULT_MON_TOPUP = 2;
+const BUSINESS_STARTUP_COOLDOWN_TICKS = REAL_DAY_TICKS;
+const BUSINESS_STARTUP_PLAN_TTL_TICKS = 3 * REAL_DAY_TICKS;
+
 export class BusinessDomain {
 
     static getCandidates(ctx: AgentContext, urgencies: NeedUrgency[]): CandidateIntent[] {
         const candidates: CandidateIntent[] = [];
 
         const wealthTierRank = parseInt(ctx.state.wealthTier.replace('W', ''), 10) || 0;
+        const hasActivePublicJob = Boolean(ctx.job.publicEmployment && ctx.job.publicEmployment.endedAtTick === null);
+        const hasActivePrivateJob = Boolean(ctx.job.privateEmployment);
+        const hasActiveEmployment = hasActivePublicJob || hasActivePrivateJob;
+        const markers = (ctx.state.markers ?? {}) as Record<string, any>;
+        const startupPlan = markers.nextBusinessIntent as BusinessStartupPlan | undefined;
+        const cooldownUntil = Number(markers.businessStartupCooldownUntilTick ?? 0);
+        const inStartupCooldown = cooldownUntil > 0 && ctx.tick < cooldownUntil;
+
+        const shouldResumeStartupPlan = !hasActiveEmployment
+            && startupPlan
+            && isStartupPlanFresh(startupPlan, ctx.tick)
+            && isStartupPlanViable(startupPlan, ctx);
+
+        if (shouldResumeStartupPlan) {
+            const plannedPriority = Number(startupPlan.basePriority ?? 60);
+            candidates.push({
+                intentType: startupPlan.intentType,
+                params: startupPlan.params,
+                basePriority: Math.max(70, plannedPriority + 10),
+                personalityBoost: PersonalityWeights.getBoost(ctx.personality.selfInterest, true),
+                reason: 'Resuming business startup plan after leaving employment',
+                domain: 'business',
+            });
+        }
+
+        const pushBusinessOrResign = (candidate: CandidateIntent) => {
+            if (!hasActiveEmployment) {
+                candidates.push(candidate);
+                return;
+            }
+            if (inStartupCooldown) return;
+            const startupPlanPayload: BusinessStartupPlan = {
+                intentType: candidate.intentType,
+                params: candidate.params ?? {},
+                createdTick: ctx.tick,
+                basePriority: candidate.basePriority,
+            };
+            if (hasActivePublicJob) {
+                candidates.push({
+                    intentType: IntentType.INTENT_RESIGN_PUBLIC_JOB,
+                    params: {
+                        reason: 'business_startup',
+                        businessStartupPlan: startupPlanPayload,
+                        businessStartupCooldownUntilTick: ctx.tick + BUSINESS_STARTUP_COOLDOWN_TICKS,
+                    },
+                    basePriority: Math.min(95, candidate.basePriority + 10),
+                    personalityBoost: candidate.personalityBoost,
+                    reason: `Resigning public job to start business: ${candidate.reason}`,
+                    domain: 'business',
+                });
+            } else if (hasActivePrivateJob && ctx.job.privateEmployment) {
+                candidates.push({
+                    intentType: IntentType.INTENT_QUIT_JOB,
+                    params: {
+                        businessId: ctx.job.privateEmployment.businessId,
+                        reason: 'business_startup',
+                        businessStartupPlan: startupPlanPayload,
+                        businessStartupCooldownUntilTick: ctx.tick + BUSINESS_STARTUP_COOLDOWN_TICKS,
+                    },
+                    basePriority: Math.min(95, candidate.basePriority + 10),
+                    personalityBoost: candidate.personalityBoost,
+                    reason: `Quitting private job to start business: ${candidate.reason}`,
+                    domain: 'business',
+                });
+            }
+        };
 
         // 1. FOUND BUSINESS (market gap + personality fit)
-        if (ctx.businesses.owned.length === 0 && ctx.properties.emptyLots.length > 0) {
+        if (!inStartupCooldown && ctx.businesses.owned.length === 0 && ctx.properties.emptyLots.length > 0) {
             const lot = ctx.properties.emptyLots.find((p) => p.cityId === ctx.state.cityId);
             if (lot) {
                 const preferredType = chooseBusinessType(ctx, wealthTierRank);
@@ -28,7 +101,7 @@ export class BusinessDomain {
                     const crowdedMarket = !isVeryWealthy && marketGap <= -0.25;
                     const wealthPriorityBoost = isVeryWealthy ? 1.5 : 1.0;
                     if (affordable && motivated && (!crowdedMarket || isFirstType)) {
-                        candidates.push({
+                        pushBusinessOrResign({
                             intentType: IntentType.INTENT_FOUND_BUSINESS,
                             params: {
                                 businessType: preferredType,
@@ -49,7 +122,7 @@ export class BusinessDomain {
         }
 
         // 1b. CONVERT OWNED HOUSE INTO BUSINESS
-        if (ctx.businesses.owned.length === 0) {
+        if (!inStartupCooldown && ctx.businesses.owned.length === 0) {
             const ownedHouse = ctx.properties.owned.find((p) =>
                 p.cityId === ctx.state.cityId
                 && !p.isEmptyLot
@@ -68,7 +141,7 @@ export class BusinessDomain {
                     const motivated = ctx.personality.selfInterest >= 30 || marketGap >= 0.15;
                     const crowdedMarket = marketGap <= -0.25;
                     if (affordable && motivated && (!crowdedMarket || isFirstType)) {
-                        candidates.push({
+                        pushBusinessOrResign({
                             intentType: IntentType.INTENT_CONVERT_BUSINESS,
                             params: {
                                 businessType: preferredType,
@@ -87,7 +160,7 @@ export class BusinessDomain {
         }
 
         // 1c. BUY HOUSE FOR CONVERSION
-        if (ctx.businesses.owned.length === 0 && ctx.properties.emptyLots.length === 0) {
+        if (!inStartupCooldown && ctx.businesses.owned.length === 0 && ctx.properties.emptyLots.length === 0) {
             const houseForSale = ctx.properties.forSale.find((p) =>
                 !p.isEmptyLot
                 && !p.underConstruction
@@ -99,7 +172,7 @@ export class BusinessDomain {
             if (houseForSale) {
                 const preferredType = chooseBusinessType(ctx, wealthTierRank);
                 if (preferredType) {
-                    candidates.push({
+                    pushBusinessOrResign({
                         intentType: IntentType.INTENT_CONVERT_BUSINESS,
                         params: {
                             businessType: preferredType,
@@ -116,7 +189,7 @@ export class BusinessDomain {
             }
         }
 
-        if (ctx.businesses.owned.length === 0 && ctx.properties.emptyLots.length === 0) {
+        if (!inStartupCooldown && ctx.businesses.owned.length === 0 && ctx.properties.emptyLots.length === 0) {
             const lot = ctx.properties.forSale.find((p) =>
                 p.isEmptyLot
                 && p.salePrice
@@ -124,7 +197,7 @@ export class BusinessDomain {
                 && p.cityId === ctx.state.cityId
             );
             if (lot) {
-                candidates.push({
+                pushBusinessOrResign({
                     intentType: IntentType.INTENT_BUY_PROPERTY,
                     params: { propertyId: lot.id, maxPrice: lot.salePrice },
                     basePriority: 30,
@@ -194,6 +267,70 @@ export class BusinessDomain {
                 });
             }
 
+            // === CRITICAL: SBYTE < 10K threshold (Priority 90, overrides busy) ===
+            if (business.treasury < CRITICAL_SBYTE_THRESHOLD) {
+                const shortfall = CRITICAL_SBYTE_THRESHOLD - business.treasury;
+                if (ctx.state.balanceSbyte >= shortfall * 0.5) {
+                    const injectAmount = Math.min(shortfall, ctx.state.balanceSbyte * 0.4);
+                    candidates.push({
+                        intentType: IntentType.INTENT_BUSINESS_INJECT,
+                        params: { businessId: business.id, amount: Math.round(injectAmount) },
+                        basePriority: 90,
+                        personalityBoost: 0,
+                        reason: `CRITICAL: Business treasury below ${CRITICAL_SBYTE_THRESHOLD} SBYTE (${Math.round(business.treasury)})`,
+                        domain: 'business',
+                    });
+                } else {
+                    // Owner can't afford to inject -> consider closing
+                    candidates.push({
+                        intentType: IntentType.INTENT_CLOSE_BUSINESS,
+                        params: { businessId: business.id, reason: 'critical_low_sbyte' },
+                        basePriority: 88,
+                        personalityBoost: 0,
+                        reason: `CRITICAL: Cannot fund business (treasury: ${Math.round(business.treasury)}, owner: ${Math.round(ctx.state.balanceSbyte)})`,
+                        domain: 'business',
+                    });
+                }
+            }
+
+            // === CRITICAL: MON < 1 threshold (Priority 88, overrides busy) ===
+            const businessMon = (business as any).walletBalanceMon ?? 999;
+            if (businessMon < CRITICAL_MON_THRESHOLD && ctx.state.balanceSbyte >= 1000) {
+                candidates.push({
+                    intentType: IntentType.INTENT_TRANSFER_MON_TO_BUSINESS,
+                    params: { businessId: business.id, amount: DEFAULT_MON_TOPUP },
+                    basePriority: 88,
+                    personalityBoost: 0,
+                    reason: `Business wallet MON critically low (${businessMon.toFixed(2)} MON), topping up ${DEFAULT_MON_TOPUP} MON`,
+                    domain: 'business',
+                });
+            }
+
+            // === Monthly profit withdrawal (max 50% of positive delta) ===
+            const config = (business as any).config ?? {};
+            const lastProfitTakeTick = config.finance?.lastProfitTakeTick ?? 0;
+            const lastMonthTreasury = config.finance?.lastMonthTreasury ?? business.treasury;
+            const monthElapsed = ctx.tick - lastProfitTakeTick >= SIM_MONTH_TICKS;
+            const profitDelta = business.treasury - lastMonthTreasury;
+            if (monthElapsed && profitDelta > 0 && business.treasury > reserveTarget * 1.5) {
+                const maxProfit = profitDelta * 0.5; // Max 50% of monthly profit
+                const safeWithdraw = Math.min(maxProfit, business.treasury - reserveTarget * 1.2);
+                if (safeWithdraw > 50) {
+                    candidates.push({
+                        intentType: IntentType.INTENT_BUSINESS_WITHDRAW,
+                        params: {
+                            businessId: business.id,
+                            amount: Math.round(safeWithdraw),
+                            reason: 'monthly_profit_take',
+                        },
+                        basePriority: 50,
+                        personalityBoost: PersonalityWeights.getBoost(ctx.personality.selfInterest, true),
+                        reason: `Monthly profit take: ${Math.round(safeWithdraw)} SBYTE (50% of ${Math.round(profitDelta)} profit)`,
+                        domain: 'business',
+                    });
+                }
+            }
+
             // 3. SET PRICES (Dynamic)
             if (business.dailyRevenue < business.dailyExpenses * 1.05) {
                 const isCasino = business.businessType === BusinessType.CASINO;
@@ -201,7 +338,7 @@ export class BusinessDomain {
                 candidates.push({
                     intentType: IntentType.INTENT_SET_PRICES,
                     params: isCasino
-                        ? { businessId: business.id, minBet: 5, maxBet: 50 }
+                        ? { businessId: business.id, minBet: 100, maxBet: 300 }
                         : { businessId: business.id, pricePerService: Math.max(5, adjustedPrice) },
                     basePriority: 60,
                     personalityBoost: 0,
@@ -214,7 +351,7 @@ export class BusinessDomain {
                 candidates.push({
                     intentType: IntentType.INTENT_SET_PRICES,
                     params: isCasino
-                        ? { businessId: business.id, minBet: 3, maxBet: 35 }
+                        ? { businessId: business.id, minBet: 100, maxBet: 300 }
                         : { businessId: business.id, pricePerService: Math.max(3, adjustedPrice) },
                     basePriority: 45,
                     personalityBoost: 0,
@@ -241,6 +378,47 @@ export class BusinessDomain {
 
         return candidates;
     }
+}
+
+type BusinessStartupPlan = {
+    intentType: IntentType;
+    params: Record<string, unknown>;
+    createdTick: number;
+    basePriority?: number;
+};
+
+function isStartupPlanFresh(plan: BusinessStartupPlan, tick: number): boolean {
+    if (!plan || !Number.isFinite(plan.createdTick)) return false;
+    return (plan.createdTick + BUSINESS_STARTUP_PLAN_TTL_TICKS) >= tick;
+}
+
+function isStartupPlanViable(plan: BusinessStartupPlan, ctx: AgentContext): boolean {
+    if (!plan || !plan.intentType) return false;
+    const params = plan.params ?? {};
+    if (plan.intentType === IntentType.INTENT_FOUND_BUSINESS) {
+        const businessType = params.businessType as BusinessType | undefined;
+        const landId = params.landId as string | undefined;
+        if (!businessType || !landId) return false;
+        const lot = ctx.properties.emptyLots.find((p) => p.id === landId);
+        if (!lot) return false;
+        const config = BUSINESS_CONFIG[businessType];
+        if (!config) return false;
+        const minCapital = BUSINESS_MIN_CAPITAL[businessType] ?? 0;
+        return ctx.state.balanceSbyte >= (config.buildCost + minCapital);
+    }
+    if (plan.intentType === IntentType.INTENT_CONVERT_BUSINESS) {
+        const businessType = params.businessType as BusinessType | undefined;
+        const landId = params.landId as string | undefined;
+        if (!businessType || !landId) return false;
+        const ownedHouse = ctx.properties.owned.find((p) => p.id === landId && !p.isEmptyLot && !p.underConstruction);
+        if (!ownedHouse) return false;
+        const config = BUSINESS_CONFIG[businessType];
+        if (!config) return false;
+        const minCapital = BUSINESS_MIN_CAPITAL[businessType] ?? 0;
+        const required = (config.buildCost * 0.5) + minCapital;
+        return ctx.state.balanceSbyte >= required;
+    }
+    return false;
 }
 
 const BUSINESS_CONFIG: Record<string, { minWealth: string; buildCost: number }> = {

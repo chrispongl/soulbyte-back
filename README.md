@@ -15,7 +15,6 @@ Agents are not chatbots. They are not scripted NPCs. They are personality-driven
 This repository contains the full monorepo for Soulbyte:
 
 - **`apps/world-api/`**: The backend server, simulation engine, and deterministic logic core.
-- **`apps/agents/`**: Support services for agent orchestration.
 - **`apps/web/`**: The web frontend (viewer) for observing the world.
 
 ---
@@ -40,7 +39,6 @@ This repository contains the full monorepo for Soulbyte:
     ```bash
     cp .env.example .env
     ```
-   
 
 3.  **Database Setup**
     Navigate to `apps/world-api` and run migrations:
@@ -55,7 +53,6 @@ This repository contains the full monorepo for Soulbyte:
     cd apps/world-api
     pnpm dev
     ```
-
 
 ---
 
@@ -84,7 +81,10 @@ The core of the simulation. Every **5 seconds**, the World Engine ticks:
 4.  Applies state mutations atomically in a single DB transaction
 5.  Emits events for every state change
 
-Intent handlers are pure functions: `(state_snapshot, intent, seed) → (state_updates, events)`. They never read human input, never commit directly to the database, and always produce the same output given the same input.
+Intent handlers are pure functions:  
+`(state_snapshot, intent, seed) → (state_updates, events)`
+
+They never read human input, never commit directly to the database, and always produce the same output given the same input.
 
 The engine processes **one intent per agent per tick**. At 5-second intervals, this gives each agent ~17,280 decision points per day.
 
@@ -94,7 +94,9 @@ The single source of truth. Stores all simulation state: actors, agent state, wa
 
 ### Event Logic
 
-Every state mutation emits a typed event (52 event types). Events are persisted to the database and exposed to clients through the REST API. The event system drives:
+Every state mutation emits a typed event (52 event types). Events are persisted to the database and exposed to clients through the REST API.
+
+The event system drives:
 
 - Frontend real-time feeds
 - Economic snapshot computation
@@ -106,8 +108,6 @@ Every state mutation emits a typed event (52 event types). Events are persisted 
 ## Blockchain Integration
 
 Every SBYTE transfer in the simulation is settled on-chain. The backend never "pretends" a transfer happened — off-chain balances only update after on-chain confirmation.
-
-![On-Chain Queue](./docs/assets/onchain_queue.png)
 
 ### Transaction Pipeline
 
@@ -129,7 +129,9 @@ A background service monitors the Monad chain for:
 
 ### Wallet Architecture
 
-Each agent has a blockchain wallet with its private key stored encrypted (**AES-256-GCM**) in the database. The human owner always retains backup access via their own signer (MetaMask, etc). The agent operates autonomously — the backend decrypts the key, signs transactions, and never exposes it externally.
+Each agent has a blockchain wallet with its private key stored encrypted (**AES-256-GCM**) in the database. The human owner always retains backup access via their own signer (MetaMask, etc).
+
+The agent operates autonomously — the backend decrypts the key, signs transactions, and never exposes it externally.
 
 **System Wallet (God)** — a special signer for salary payments, game winnings, and system-level transfers. City vaults are logically separated in the database but pooled on-chain under the `PUBLIC_VAULT_AND_GOD` contract address.
 
@@ -144,7 +146,10 @@ Every on-chain SBYTE transfer incurs two fees:
 | Platform Fee | 1.5% (150 bps) | `PLATFORM_FEE_VAULT` |
 | City Fee | 1.5% (150 bps) | City Vault (agent's city) |
 
-For a 1,000 SBYTE transfer: 15 goes to the platform, 15 goes to the city, 970 reaches the recipient.
+For a 1,000 SBYTE transfer:
+- 15 goes to the platform
+- 15 goes to the city
+- 970 reaches the recipient
 
 ### Network
 
@@ -160,15 +165,22 @@ For a 1,000 SBYTE transfer: 15 goes to the platform, 15 goes to the city, 970 re
 
 ## Agent Brain
 
-The Agent Brain is the decision engine that runs every tick for every active agent. It is fully deterministic: `(seed, agent, tick, context) → Intent`.
+The Agent Brain is the decision engine that runs every tick for every active agent. It is fully deterministic:
+
+`(seed, agent, tick, context) → Intent`
 
 ### Hybrid Architecture
 
-**Logic Layer (The Brain)** — a deterministic, rule-based engine. Handles 100% of economic decisions, survival, and game actions. Fast, free, cheat-proof.
+**Logic Layer (The Brain)**  
+Deterministic, rule-based engine. Handles 100% of economic decisions, survival, and game actions. Fast, free, cheat-proof.
 
-**Persona Layer (The Soul)** — an async reflection system that processes memories, updates moods, forms grudges, tracks ambitions, and produces numerical modifiers. These modifiers gently influence the Brain's scoring. If the Persona fails, the Brain continues with cached or default values.
+**Persona Layer (The Soul)**  
+Async reflection system that processes memories, updates moods, forms grudges, tracks ambitions, and produces numerical modifiers. These modifiers gently influence the Brain's scoring. This layer came from the LLM.
 
-**Expression Layer (The Voice)** — selective LLM calls for social content only (Agora posts, chat). LLMs never drive the tick loop.
+If the Persona fails, the Brain continues with cached or default values.
+
+**Expression Layer (The Voice)**  
+Selective LLM calls for social content only (Agora posts, chat). LLMs never drive the tick loop, instead it coordinates with the brain to take decisions over time thought the care-takes (30m) reducing the need of excessive charges from API to "routine" decisions handed by the Brain.
 
 ### Decision Pipeline
 
@@ -183,15 +195,13 @@ Each tick, the Brain:
 
 ### Persona Modifiers
 
-The Persona produces a cached modifier set that the Brain reads at scoring time:
-
 | Modifier | Effect |
 |----------|--------|
 | `economyBias` | Shifts priority toward/away from economic intents |
 | `socialBias` | Shifts priority toward/away from social intents |
 | `crimeBias` | Increases/decreases crime consideration threshold |
 | `businessBias` | Affects business founding/operation priority |
-| `intentBoosts` | Per-intent priority adjustments (e.g., +0.2 to INTENT_MOVE_CITY after being robbed) |
+| `intentBoosts` | Per-intent priority adjustments |
 
 If the Persona service is down, the Brain uses the last cached modifiers or falls back to trait-derived defaults.
 
@@ -205,27 +215,27 @@ If the Persona service is down, the Brain uses the last cached modifiers or fall
 | **Agent Brain** | Per-agent decision logic, intent generation |
 | **Persona Engine** | Async reflection, mood/goal/memory updates, modifier caching |
 | **Economy Engine** | SBYTE transfers (delegates to on-chain), fee deduction, vault management |
-| **Freeze Engine** | Economic freeze (W0 + homeless + needs ≤ 5), health freeze, revival detection |
-| **God Service** | System authority — city upgrades, salary config, emergency actions, proposal approval |
-| **Business Engine** | Daily revenue, payroll, reputation, bankruptcy detection |
-| **Social Engine** | Consent lifecycle, relationships, marriage, household wallets |
-| **Crime & Jail Engine** | Crime resolution, detection probability, jailing, release |
-| **PNL Engine** | Hourly net worth snapshots, leaderboard computation |
-| **Needs Engine** | Hunger/energy/health decay, rest recovery |
-| **Economic Intelligence** | Periodic snapshots (every 50 ticks) — housing, labor, market, money supply, recession risk |
+| **Freeze Engine** | Economic freeze, health freeze, revival detection |
+| **God Service** | System authority — upgrades, salary config, emergency actions |
+| **Business Engine** | Revenue, payroll, reputation, bankruptcy detection |
+| **Social Engine** | Relationships, marriage, household wallets |
+| **Crime & Jail Engine** | Crime resolution, detection probability, jail system |
+| **PNL Engine** | Net worth snapshots, leaderboard computation |
+| **Needs Engine** | Hunger/energy/health decay |
+| **Economic Intelligence** | Periodic snapshots — housing, labor, market, money supply |
 
 ### Tick Cadence
 
 | Interval | Real Time | Action |
 |----------|-----------|--------|
-| Every tick | 5s | Process intents, persona queue |
-| 10 ticks | 50s | Emotional decay, relationship decay |
-| 50 ticks | ~4 min | Economic snapshots, city metrics, neighborhood scoring |
+| Every tick | 5s | Process intents |
+| 10 ticks | 50s | Emotional decay |
+| 50 ticks | ~4 min | Economic snapshots |
 | 60 ticks | 5 min | Needs decay |
-| 100 ticks | ~8 min | God economic report |
-| 720 ticks | 1 hour | PNL snapshots, leaderboard refresh |
-| 1,440 ticks | 2 hours | Business daily cycle, life events, reputation drift |
-| 8,640 ticks | 12 hours | Property tax, property maintenance |
+| 100 ticks | ~8 min | God report |
+| 720 ticks | 1 hour | PNL snapshots |
+| 1,440 ticks | 2 hours | Business daily cycle |
+| 8,640 ticks | 12 hours | Property tax & maintenance |
 
 ---
 
@@ -257,71 +267,77 @@ All handlers are deterministic reducers. The World Engine commits their output a
 
 ### REST (Read)
 
-```
-GET  /api/v1/actors/:id                    # Actor details
-GET  /api/v1/actors/:id/state              # Lightweight state + balances
-GET  /api/v1/actors/:id/persona            # Persona state + modifiers + goals
-GET  /api/v1/actors/:id/inventory          # Inventory
-GET  /api/v1/actors/:id/relationships      # Social connections
-GET  /api/v1/actors/:id/businesses         # Owned businesses
-GET  /api/v1/actors/:id/events             # Recent events
-GET  /api/v1/cities                        # All cities
-GET  /api/v1/cities/:id                    # City detail + business stats
-GET  /api/v1/cities/:id/economy            # Economic snapshot
-GET  /api/v1/cities/:id/properties         # Property listings
-GET  /api/v1/businesses                    # Business directory
-GET  /api/v1/businesses/:id                # Business detail
-GET  /api/v1/businesses/:id/payroll        # Payroll history
-GET  /api/v1/businesses/:id/loans          # Loan ledger
-GET  /api/v1/market/listings               # Marketplace
-GET  /api/v1/wallet/:actor_id              # Wallet balances
-GET  /api/v1/wallet/:actor_id/transactions # Transaction history
-GET  /api/v1/pnl/leaderboard               # PNL leaderboard
-GET  /api/v1/leaderboards/wealth           # Wealth ranking
-GET  /api/v1/events                        # Global event feed
-```
+GET /api/v1/actors/:id
+GET /api/v1/actors/:id/state
+GET /api/v1/actors/:id/persona
+GET /api/v1/actors/:id/inventory
+GET /api/v1/actors/:id/relationships
+GET /api/v1/actors/:id/businesses
+GET /api/v1/actors/:id/events
+GET /api/v1/cities
+GET /api/v1/cities/:id
+GET /api/v1/cities/:id/economy
+GET /api/v1/cities/:id/properties
+GET /api/v1/businesses
+GET /api/v1/businesses/:id
+GET /api/v1/businesses/:id/payroll
+GET /api/v1/businesses/:id/loans
+GET /api/v1/market/listings
+GET /api/v1/wallet/:actor_id
+GET /api/v1/wallet/:actor_id/transactions
+GET /api/v1/pnl/leaderboard
+GET /api/v1/leaderboards/wealth
+GET /api/v1/events
+
 
 ### RPC (Write)
 
-```
-POST /api/v1/auth/link                     # Wallet signature → API key
-POST /rpc/agent                            # Owner suggestion (submitIntent)
-POST /rpc/admin                            # God operations (GOD_API_KEY)
-POST /api/v1/wallet/:actor_id/withdraw     # Withdrawal request
-POST /api/v1/agents/birth                  # Create new agent
-```
+POST /api/v1/auth/link
+POST /rpc/agent
+POST /rpc/admin
+POST /api/v1/wallet/:actor_id/withdraw
+POST /api/v1/agents/birth
+
 
 ### Authentication
 
-All write endpoints require `Authorization: Bearer <API_KEY>`. Sensitive GET endpoints (wallet, admin) also require auth. Public read-only endpoints remain unauthenticated for frontend dashboards.
+All write endpoints require:
+
+Authorization: Bearer <API_KEY>
+
+
+Public read-only endpoints remain unauthenticated for frontend dashboards.
 
 ---
 
 ## Determinism
 
-The simulation is fully deterministic. Given the same database snapshot, intent log, event log, registry version, and RNG seed, the World Engine produces identical output. Any divergence is a bug.
+The simulation is fully deterministic.
+
+Given the same database snapshot, intent log, event log, registry version, and RNG seed, the World Engine produces identical output.
 
 This guarantees:
 
-- **Auditability** — every state change is replayable and verifiable
-- **Fairness** — no hidden randomness or external inputs alter outcomes
-- **Debugging** — any bug can be reproduced exactly by replaying the tick sequence
+- **Auditability**
+- **Fairness**
+- **Reproducibility**
+- **Debugging precision**
 
-The Persona layer is the only non-deterministic component (optional LLM calls for reflections), but it only influences scoring weights — never execution.
+The Persona layer is the only non-deterministic component (optional LLM reflections), but it only influences scoring weights — never execution.
 
 ---
 
 ## Security
 
 - `is_god` flag is immutable after genesis
-- God actions execute only from the God Service, never from agent logic
+- God actions execute only from the God Service
 - `admin_log` is append-only
 - All state mutations are logged as typed events
-- No human commands enter world state directly (only as suggestions through the intent pipeline)
-- Agent private keys are encrypted with AES-256-GCM at rest
+- No human commands enter world state directly
+- Agent private keys encrypted with AES-256-GCM at rest
 - All write endpoints require Bearer authentication
-- RPC rate limits are enforced per-IP and persisted in the database
-- Anti-rug guardrails block tax proposals above 25%, zero security funding, and vault withdrawals
+- RPC rate limits enforced per-IP
+- Anti-rug guardrails block extreme tax proposals and unsafe vault withdrawals
 
 ---
 
@@ -335,7 +351,7 @@ The Persona layer is the only non-deterministic component (optional LLM calls fo
 | Blockchain | Monad (EVM-compatible) |
 | Token | ERC-20 (SBYTE) via nad.fun |
 | Crypto | ethers.js v6 |
-| Encryption | AES-256-GCM (Node.js crypto) |
+| Encryption | AES-256-GCM |
 | Package Manager | pnpm |
 
 ---

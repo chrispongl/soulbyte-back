@@ -322,6 +322,76 @@ export async function businessRoutes(app: FastifyInstance) {
     });
 
     /**
+     * GET /api/v1/businesses/:id/transactions
+     * Returns the last N on-chain transactions involving this business's wallet
+     */
+    app.get('/api/v1/businesses/:id/transactions', async (request, reply) => {
+        const { id } = request.params as { id: string };
+        const { limit } = request.query as { limit?: string };
+        const business = await prisma.business.findUnique({
+            where: { id },
+            select: { id: true, name: true, ownerId: true }
+        });
+        if (!business) return reply.code(404).send({ error: 'Business not found' });
+
+        const bWallet = await prisma.businessWallet.findUnique({
+            where: { businessId: id },
+            select: { walletAddress: true }
+        });
+
+        const take = Math.min(Number(limit ?? 50), 100);
+
+        // Find transactions where the business wallet address is involved
+        const transactions = await prisma.onchainTransaction.findMany({
+            where: bWallet ? {
+                status: 'confirmed',
+                OR: [
+                    { fromAddress: bWallet.walletAddress },
+                    { toAddress: bWallet.walletAddress },
+                    { fromActorId: business.ownerId },
+                    { toActorId: business.ownerId }
+                ]
+            } : {
+                status: 'confirmed',
+                OR: [
+                    { fromActorId: business.ownerId },
+                    { toActorId: business.ownerId }
+                ]
+            },
+            orderBy: { createdAt: 'desc' },
+            take,
+            select: {
+                id: true, txHash: true, fromAddress: true, toAddress: true,
+                fromActorId: true, toActorId: true, amount: true,
+                txType: true, status: true, createdAt: true
+            }
+        });
+
+        // Resolve actor names
+        const actorIds = new Set<string>();
+        for (const tx of transactions) {
+            if (tx.fromActorId) actorIds.add(tx.fromActorId);
+            if (tx.toActorId) actorIds.add(tx.toActorId);
+        }
+        const actors = actorIds.size > 0
+            ? await prisma.actor.findMany({
+                where: { id: { in: Array.from(actorIds) } },
+                select: { id: true, name: true }
+            }) : [];
+        const actorNameById = new Map(actors.map(a => [a.id, a.name]));
+
+        return reply.send({
+            transactions: transactions.map(tx => ({
+                ...tx,
+                amount: tx.amount.toString(),
+                fromActorName: tx.fromActorId ? actorNameById.get(tx.fromActorId) ?? null : null,
+                toActorName: tx.toActorId ? actorNameById.get(tx.toActorId) ?? null : null,
+                direction: bWallet && tx.toAddress === bWallet.walletAddress ? 'IN' : 'OUT'
+            }))
+        });
+    });
+
+    /**
      * GET /api/v1/businesses/:id/payroll
      */
     app.get('/api/v1/businesses/:id/payroll', async (request, reply) => {

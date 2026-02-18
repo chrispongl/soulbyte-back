@@ -55,6 +55,7 @@ export interface AgentContext {
         totalGamesPlayed?: number;
         totalGamesWon?: number;
         noGamesUntilTick?: number;
+        markers?: Record<string, unknown>;
     };
     economy: EconomicSnapshotData | null;
     economicGuidance?: EconomicGuidance | null;
@@ -71,6 +72,7 @@ export interface AgentContext {
             neighborhoodScore?: number;
             forRent: boolean;
             forSale: boolean;
+            isEmptyLot?: boolean;
         }>;
         emptyLots: Array<{
             id: string;

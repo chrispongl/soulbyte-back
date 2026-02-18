@@ -307,6 +307,20 @@ export async function walletRoutes(app: FastifyInstance): Promise<void> {
                 : [];
             const actorNameById = new Map(actors.map(a => [a.id, a.name]));
 
+            // Resolve business wallets from addresses
+            const allAddresses = new Set<string>();
+            for (const tx of transactions) {
+                if (tx.fromAddress) allAddresses.add(tx.fromAddress);
+                if (tx.toAddress) allAddresses.add(tx.toAddress);
+            }
+            const businessWallets = allAddresses.size > 0
+                ? await prisma.businessWallet.findMany({
+                    where: { walletAddress: { in: Array.from(allAddresses) } },
+                    select: { walletAddress: true, businessId: true, business: { select: { id: true, name: true } } }
+                })
+                : [];
+            const businessByAddress = new Map(businessWallets.map(bw => [bw.walletAddress, bw.business]));
+
             return reply.send({
                 ok: true,
                 total,
@@ -318,8 +332,12 @@ export async function walletRoutes(app: FastifyInstance): Promise<void> {
                     toAddress: tx.toAddress,
                     fromActorId: tx.fromActorId,
                     fromActorName: tx.fromActorId ? actorNameById.get(tx.fromActorId) ?? null : null,
+                    fromBusinessId: tx.fromAddress ? businessByAddress.get(tx.fromAddress)?.id ?? null : null,
+                    fromBusinessName: tx.fromAddress ? businessByAddress.get(tx.fromAddress)?.name ?? null : null,
                     toActorId: tx.toActorId,
                     toActorName: tx.toActorId ? actorNameById.get(tx.toActorId) ?? null : null,
+                    toBusinessId: tx.toAddress ? businessByAddress.get(tx.toAddress)?.id ?? null : null,
+                    toBusinessName: tx.toAddress ? businessByAddress.get(tx.toAddress)?.name ?? null : null,
                     amount: tx.amount.toString(),
                     txType: tx.txType,
                     platformFee: tx.platformFee.toString(),

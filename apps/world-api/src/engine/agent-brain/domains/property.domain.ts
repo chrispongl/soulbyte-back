@@ -117,16 +117,22 @@ export class PropertyDomain {
             const targetSale = Math.max(1, Math.round(marketSale * saleMultiplier));
 
             const isVacant = !prop.tenantId;
-            const shouldConsiderSale = ownedCount > 1
-                && (vacancy > 0.3 || (ctx.economy?.unemployment ?? 0) > 0.3);
+            // Empty lots cannot be rented, only sold
+            const isEmptyLot = prop.isEmptyLot === true;
+            const shouldConsiderSale = isEmptyLot || (ownedCount > 1
+                && (vacancy > 0.3 || (ctx.economy?.unemployment ?? 0) > 0.3));
 
             if (isVacant && (!prop.forRent && !prop.forSale)) {
+                // For empty lots, only list for sale (renting blocked by handler)
+                const listForRent = !shouldConsiderSale && !isEmptyLot;
+                const listForSale = shouldConsiderSale || isEmptyLot;
                 debugLog('property.list_candidate', {
                     agentId: ctx.agent.id,
                     tick: ctx.tick,
                     propertyId: prop.id,
-                    forRent: !shouldConsiderSale,
-                    forSale: shouldConsiderSale,
+                    forRent: listForRent,
+                    forSale: listForSale,
+                    isEmptyLot,
                     targetRent,
                     targetSale,
                 });
@@ -134,15 +140,15 @@ export class PropertyDomain {
                     intentType: IntentType.INTENT_LIST_PROPERTY,
                     params: {
                         propertyId: prop.id,
-                        forRent: !shouldConsiderSale,
-                        forSale: shouldConsiderSale,
-                        rentPrice: targetRent,
-                        salePrice: shouldConsiderSale ? targetSale : undefined,
+                        forRent: listForRent,
+                        forSale: listForSale,
+                        rentPrice: listForRent ? targetRent : undefined,
+                        salePrice: listForSale ? targetSale : undefined,
                     },
                     basePriority: 32,
                     personalityBoost: PersonalityWeights.getBoost(ctx.personality.selfInterest, true),
-                    reason: shouldConsiderSale
-                        ? 'Listing vacant property for sale due to weak rental market'
+                    reason: listForSale
+                        ? (isEmptyLot ? 'Listing empty lot for sale' : 'Listing vacant property for sale due to weak rental market')
                         : 'Listing vacant property for rent at market rate',
                     domain: 'economy',
                 });
